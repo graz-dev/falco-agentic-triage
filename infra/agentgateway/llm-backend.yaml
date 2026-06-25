@@ -1,0 +1,48 @@
+# IMPORTANT: Before applying this file, copy the exact model identifier string
+# from LM Studio's Developer → Local Server tab (the "Model" dropdown) and paste
+# it into spec.ai.groups[0].providers[0].openai.model below.
+# Example: google/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: lmstudio
+  namespace: agentgateway-system
+spec:
+  ai:
+    groups:
+      - providers:
+          - name: lmstudio
+            # host.docker.internal resolves to the Mac host from inside Kind on Docker Desktop.
+            # Linux users: add --add-host=host.docker.internal:host-gateway to Docker daemon.
+            host: host.docker.internal
+            port: 1234
+            pathPrefix: /v1
+            openai:
+              # REPLACE with the exact model identifier from LM Studio's server tab
+              model: "google/gemma-4-e4b/gemma-4-4EB-it-Q4_K_M.gguf"
+            policies:
+              auth:
+                # LM Studio does not validate API keys — pass through the client-provided key
+                passthrough: {}
+---
+# HTTPRoute connects the Gateway listener to the lmstudio AgentgatewayBackend.
+# All /v1/* requests (chat/completions, etc.) are routed to LM Studio.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llm-route
+  namespace: agentgateway-system
+spec:
+  parentRefs:
+    - name: agentgateway-system-gateway
+      namespace: agentgateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: lmstudio
+          kind: AgentgatewayBackend
+          group: agentgateway.dev
+          port: 80

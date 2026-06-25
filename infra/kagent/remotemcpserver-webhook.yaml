@@ -1,0 +1,12 @@
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: webhook-receiver-mcp
+  namespace: kagent
+spec:
+  description: "Falco alert buffer and triage result tools served by webhook-receiver"
+  url: "http://webhook-receiver.demo.svc.cluster.local:8000/mcp"
+  protocol: STREAMABLE_HTTP
+  timeout: 30s
+  sseReadTimeout: 5m0s
+  terminateOnClose: true

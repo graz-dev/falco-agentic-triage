@@ -1,0 +1,25 @@
+# IMPORTANT: Set spec.model to the same identifier as in infra/agentgateway/llm-backend.yaml.
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: gemma4-local
+  namespace: kagent
+spec:
+  provider: OpenAI
+  # REPLACE with the exact model identifier from LM Studio's server tab
+  model: "google/gemma-4-e4b/gemma-4-4EB-it-Q4_K_M.gguf"
+  openAI:
+    # agentgateway Gateway service — proxies to LM Studio on the host.
+    # Verify the exact service name: kubectl get svc -n agentgateway-system
+    baseUrl: "http://agentgateway-system-gateway.agentgateway-system.svc.cluster.local/v1"
+  apiKeySecret: lmstudio-key
+  apiKeySecretKey: apiKey
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lmstudio-key
+  namespace: kagent
+type: Opaque
+stringData:
+  apiKey: lm-studio

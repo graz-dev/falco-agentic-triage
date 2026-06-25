@@ -1,0 +1,29 @@
+# ClusterRole and binding that allow the kagent ServiceAccount to read pod
+# metadata, events, and ownership information needed for triage correlation.
+# Scoped to read-only verbs only — the triage agent never modifies K8s state.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kagent-triage-reader
+rules:
+  - apiGroups: [""]
+    resources: ["events", "pods", "namespaces", "serviceaccounts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kagent-triage-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kagent-triage-reader
+subjects:
+  # kagent controller ServiceAccount — verify the exact name after installing kagent:
+  #   kubectl get serviceaccounts -n kagent
+  - kind: ServiceAccount
+    name: kagent-controller
+    namespace: kagent

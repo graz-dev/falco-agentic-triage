@@ -1,0 +1,22 @@
+# Kubeconfig used by the kube-apiserver to deliver audit events to the
+# Falco k8saudit plugin via a NodePort service.
+#
+# kube-apiserver runs with hostNetwork in the Kind node, so it can reach
+# NodePort 30765 on localhost once Falco is deployed. Audit webhook failures
+# before Falco starts are dropped silently (async batch mode).
+apiVersion: v1
+kind: Config
+clusters:
+  - name: falco-k8saudit
+    cluster:
+      server: http://localhost:30765/k8s-audit
+      insecure-skip-tls-verify: true
+users:
+  - name: k8s-apiserver
+    user: {}
+contexts:
+  - name: default
+    context:
+      cluster: falco-k8saudit
+      user: k8s-apiserver
+current-context: default

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-http-output-config
+  namespace: falco
+data:
+  # Drop-in config for Falco loaded from config.d — enables JSON output and HTTP forwarding to Falcosidekick.
+  http-output.yaml: |
+    json_output: true
+    http_output:
+      enabled: true
+      url: "http://falcosidekick.falco.svc.cluster.local:2801"
+      insecure: true

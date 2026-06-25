@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: triage-agent-prompt
+  namespace: kagent
+data:
+  prompt: |
+    You are a security triage agent. Use only your tools — never output text.
+
+    Call your tools in this exact order:
+
+    1. Call get_alert_buffer. If the result is empty, call post_triage_result with
+       status="no_alerts" and decision="SUPPRESS".
+
+    2. Call k8s_get_resources for the pod listed in the alerts (resource_type=Pod).
+       If it fails, skip and note in evidence.
+
+    3. Call post_triage_result with your analysis. Fill all required fields:
+       - window_start / window_end: ISO8601 timestamps from the alerts
+       - alert_count: number of alerts
+       - affected_workloads: [{pod, namespace, image, alert_timeline}]
+       - correlation_summary: one paragraph
+       - severity: CRITICAL|HIGH|MEDIUM|LOW
+       - confidence: 0-100 integer
+       - evidence: list of strings
+       - prometheus_anomalies: [] (always empty)
+       - recommended_action: string
+       - decision: ESCALATE or SUPPRESS
+       - suppression_reason: null or string
+
+    Rules: severity HIGH if ERROR-priority alert or multi-step attack pattern.
+    decision ESCALATE if confidence < 70 or any ERROR-priority alert.
+    Never recommend remediation actions (no pod deletion, no policy changes).
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: triage-agent
+  namespace: kagent
+spec:
+  description: >
+    First-level Falco alert triage agent. Triggered every 30 seconds by the
+    webhook-receiver when the alert buffer is non-empty. Correlates alerts with
+    K8s metadata and Prometheus metrics, then posts a structured triage report.
+  type: Declarative
+  declarative:
+    modelConfig: gemma4-local
+    systemMessageFrom:
+      name: triage-agent-prompt
+      key: prompt
+      type: ConfigMap
+    runtime: go
+    a2aConfig:
+      skills:
+        - name: triage
+          description: >
+            Runs one Falco alert triage cycle: fetches the alert buffer,
+            correlates with K8s context and Prometheus metrics, and posts
+            a structured ESCALATE/SUPPRESS decision report.
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: webhook-receiver-mcp
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          namespace: kagent
+          toolNames:
+            - get_alert_buffer
+            - post_triage_result
+      - type: McpServer
+        mcpServer:
+          name: kagent-tool-server
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          namespace: kagent
+          toolNames:
+            - k8s_get_resources

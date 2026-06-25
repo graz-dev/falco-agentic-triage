@@ -1,0 +1,39 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Capture pod exec and attach in full — primary syscall exec detection signal
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach"]
+
+  # Capture secret reads in prod — credential access detection
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get", "list"]
+    namespaces: ["prod"]
+
+  # Capture privilege escalation via RBAC binding changes
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterrolebindings", "rolebindings"]
+    verbs: ["create", "update", "patch"]
+
+  # Suppress noisy read-only requests to avoid overwhelming Kind's single-node log
+  - level: None
+    verbs: ["get", "list", "watch"]
+    resources:
+      - group: ""
+        resources: ["events", "endpoints", "configmaps", "serviceaccounts"]
+      - group: "apps"
+        resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+      - group: "metrics.k8s.io"
+        resources: ["*"]
+
+  # Everything else at Metadata level
+  - level: Metadata
+    omitStages:
+      - RequestReceived

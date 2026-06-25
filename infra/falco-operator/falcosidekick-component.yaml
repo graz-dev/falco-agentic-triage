@@ -1,0 +1,37 @@
+---
+# ConfigMap with Falcosidekick YAML config — avoids env var limitations in v2.32.0.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falcosidekick-config
+  namespace: falco
+data:
+  config.yaml: |
+    listenaddress: ""
+    listenport: 2801
+    webhook:
+      address: "http://webhook-receiver.demo.svc.cluster.local:8000/ingest"
+      checkcert: false
+      minimumpriority: "warning"
+---
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Component
+metadata:
+  name: falcosidekick
+  namespace: falco
+spec:
+  component:
+    type: falcosidekick
+  podTemplateSpec:
+    spec:
+      containers:
+        - name: falcosidekick
+          args:
+            - "--config-file=/etc/falcosidekick/config.yaml"
+          volumeMounts:
+            - name: falcosidekick-cfg
+              mountPath: /etc/falcosidekick
+      volumes:
+        - name: falcosidekick-cfg
+          configMap:
+            name: falcosidekick-config

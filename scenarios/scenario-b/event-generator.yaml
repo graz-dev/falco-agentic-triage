@@ -1,0 +1,71 @@
+# ServiceAccount with pod/exec permission (reuse from scenario-a if already applied).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: event-generator
+  namespace: prod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: event-generator
+  namespace: prod
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: event-generator
+  namespace: prod
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: event-generator
+subjects:
+  - kind: ServiceAccount
+    name: event-generator
+    namespace: prod
+---
+# Three-event attack sequence within a single 30-second triage window:
+#
+#   T+0s  syscall.ReadSensitiveFileUntrusted → "Read sensitive file untrusted" WARNING
+#   T+3s  syscall.ExecInsideContainer        → "Terminal shell in container"   WARNING
+#   T+6s  syscall.WriteBelowEtcDirectory     → "Write below etc"               ERROR
+#
+# This simulates: file reconnaissance → interactive access → persistence attempt.
+# When the agent receives all three in the same window it should produce a
+# CRITICAL/HIGH ESCALATE decision with a multi-step intrusion narrative.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: event-generator
+  namespace: prod
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: event-generator
+      containers:
+        - name: event-generator
+          image: falcosecurity/event-generator:0.13.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              event-generator run syscall.ReadSensitiveFileUntrusted --loop=false
+              sleep 3
+              event-generator run syscall.RunShellUntrusted --loop=false
+              sleep 3
+              touch /etc/falco-demo-persistence-marker
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi

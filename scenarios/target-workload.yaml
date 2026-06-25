@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    environment: prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+      env: prod
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: webapp
+        env: prod
+        tier: frontend
+    spec:
+      containers:
+        - name: webapp
+          image: nginx:1.27.0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
