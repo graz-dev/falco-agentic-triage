@@ -219,6 +219,71 @@ def _get_pod_events_sync(pod: str, namespace: str) -> dict:
 
 
 # ─── MCP STREAMABLE_HTTP endpoint ─────────────────────────────────────────────
+def _normalize_report(raw: dict) -> dict:
+    """Normalize the model's post_triage_result arguments.
+    The model uses inconsistent field names and occasionally nests data incorrectly.
+    This function extracts canonical fields from whatever structure the model provides.
+    """
+    def _str(v, default=""):
+        return str(v) if v is not None else default
+
+    def _int(v, default=0):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    def _list(v):
+        if isinstance(v, list):
+            return v
+        return []
+
+    # Normalize affected_workloads: the model uses many different field name patterns.
+    raw_wl = _list(raw.get("affected_workloads"))
+    workloads = []
+    for w in raw_wl:
+        if not isinstance(w, dict):
+            continue
+        # Some runs nest data inside an "affected_workloads_list" sub-key
+        if "affected_workloads_list" in w and not w.get("pod") and not w.get("name"):
+            inner = w.get("affected_workloads_list", [])
+            if inner and isinstance(inner, list) and isinstance(inner[0], dict):
+                w = {**w, **inner[0]}
+        pod = (w.get("pod") or w.get("k8s_pod_name") or w.get("name") or
+               w.get("pod_name") or w.get("k8s.pod.name") or "")
+        ns = (w.get("namespace") or w.get("k8s_ns_name") or
+              w.get("namespace_name") or w.get("k8s.ns.name") or "")
+        image = (w.get("image") or w.get("image_repository") or
+                 w.get("container_image_repository") or "")
+        timeline = w.get("alert_timeline")
+        if isinstance(timeline, dict):
+            timeline = (timeline.get("alerts") or timeline.get("events") or
+                        timeline.get("alert_timeline") or [])
+        workloads.append({
+            "pod": pod,
+            "namespace": ns,
+            "image": image,
+            "alert_timeline": _list(timeline),
+        })
+
+    report = {
+        "window_start": _str(raw.get("window_start")),
+        "window_end": _str(raw.get("window_end")),
+        "alert_count": _int(raw.get("alert_count")),
+        "affected_workloads": workloads,
+        "correlation_summary": _str(raw.get("correlation_summary")),
+        "severity": _str(raw.get("severity"), "MEDIUM"),
+        "confidence": _int(raw.get("confidence"), 50),
+        "evidence": _list(raw.get("evidence")),
+        "prometheus_anomalies": _list(raw.get("prometheus_anomalies")),
+        "recommended_action": _str(raw.get("recommended_action")),
+        "decision": _str(raw.get("decision"), "ESCALATE"),
+        "suppression_reason": raw.get("suppression_reason"),
+        "timestamp_received": _now(),
+    }
+    return report
+
+
 # Exposes get_alert_buffer, get_pod_metrics, and post_triage_result as MCP tools
 # so kagent's triage-agent can read the alert window, query Prometheus, and post
 # results — all without requiring external HTTP tool CRDs.
@@ -329,25 +394,40 @@ async def mcp_endpoint(request: Request):
         params = body.get("params", {})
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        # Gemma4/ADK sometimes serializes arguments as a JSON string (OpenAI format).
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
 
         if tool_name == "get_alert_buffer":
-            # Deduplicate by (rule, pod) to keep the LLM context small.
-            # Keep only the first occurrence of each rule+pod combination plus
-            # a summary of how many times it repeated.
+            # Return a minimal projection per alert to keep LLM context small.
             raw = list(alert_buffer)
             seen: dict = {}
-            deduped = []
+            summary = []
             for a in raw:
-                key = (a.get("rule", ""), a.get("output_fields", {}).get("k8s.pod.name", ""))
+                of = a.get("output_fields") or {}
+                pod = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
+                ns = of.get("k8s.ns.name") or of.get("k8s_ns_name") or ""
+                image = (of.get("container.image.repository") or
+                         of.get("container_image_repository") or "")
+                key = (a.get("rule", ""), pod)
                 if key not in seen:
                     seen[key] = 0
-                    deduped.append(a)
+                    summary.append({
+                        "rule": a.get("rule", ""),
+                        "priority": a.get("priority", ""),
+                        "time": a.get("time") or a.get("timestamp_received", ""),
+                        "pod": pod,
+                        "namespace": ns,
+                        "image": image,
+                        "output": (a.get("output") or "")[:120],
+                    })
                 seen[key] += 1
-            # Annotate with repeat count and cap at 25 unique entries
-            for a in deduped[:25]:
-                key = (a.get("rule", ""), a.get("output_fields", {}).get("k8s.pod.name", ""))
-                a["_repeat_count"] = seen[key]
-            result = {"content": [{"type": "text", "text": json.dumps(deduped[:25])}]}
+            for s in summary:
+                s["repeat_count"] = seen[(s["rule"], s["pod"])]
+            result = {"content": [{"type": "text", "text": json.dumps(summary[:15])}]}
         elif tool_name == "get_pod_events":
             pod = arguments.get("pod", "")
             namespace = arguments.get("namespace", "prod")
@@ -359,9 +439,10 @@ async def mcp_endpoint(request: Request):
             metrics = await asyncio.to_thread(_get_pod_metrics_sync, pod, namespace)
             result = {"content": [{"type": "text", "text": json.dumps(metrics)}]}
         elif tool_name == "post_triage_result":
-            triage_reports.appendleft(arguments)
+            report = _normalize_report(arguments)
+            triage_reports.appendleft(report)
             alert_buffer.clear()
-            await _broadcast("report", json.dumps(arguments))
+            await _broadcast("report", json.dumps(report))
             result = {"content": [{"type": "text", "text": '{"status":"ok","flushed":true}'}]}
         else:
             return JSONResponse(
@@ -570,8 +651,8 @@ function renderReport(d) {
     const desc = w.alert_timeline_description || '';
     return `
     <div class="workload-block">
-      <div class="workload-name">${esc(w.pod||w.k8s_pod_name)} <span style="color:#6e7681">/ ${esc(w.namespace||w.k8s_ns_name)}</span></div>
-      <div class="workload-image">${esc(w.image||w.image_repository)}</div>
+      <div class="workload-name">${esc(w.pod||w.k8s_pod_name||w.name)} <span style="color:#6e7681">/ ${esc(w.namespace||w.k8s_ns_name)}</span></div>
+      <div class="workload-image">${esc(w.image||w.image_repository||w.container_image_repository)}</div>
       ${timelineHtml}
       ${desc ? `<div style="font-size:11px;color:#6e7681;margin-top:4px;font-style:italic">${esc(desc)}</div>` : ''}
     </div>`;
