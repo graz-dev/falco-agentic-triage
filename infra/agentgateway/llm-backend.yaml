@@ -23,7 +23,7 @@ spec:
               #   Qwen/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf
               # For Qwen2.5-14B:
               #   Qwen/Qwen2.5-14B-Instruct-GGUF/Qwen2.5-14B-Instruct-Q4_K_M.gguf
-              model: "qwen2.5-coder-7b-instruct-mlx"
+              model: "qwen2.5-7b-instruct-mlx"
             policies:
               auth:
                 # LM Studio does not validate API keys — pass through the client-provided key

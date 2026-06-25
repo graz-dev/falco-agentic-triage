@@ -8,7 +8,7 @@ spec:
   provider: OpenAI
   # REPLACE with the exact identifier shown in LM Studio's Developer → Local Server → Model dropdown.
   # Must match infra/agentgateway/llm-backend.yaml exactly.
-  model: "qwen2.5-coder-7b-instruct-mlx"
+  model: "qwen2.5-7b-instruct-mlx"
   openAI:
     # agentgateway Gateway service — proxies to LM Studio on the host.
     # Verify the exact service name: kubectl get svc -n agentgateway-system
