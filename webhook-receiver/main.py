@@ -406,14 +406,16 @@ _MCP_TOOLS = [
             "ESCALATE if confidence<70, if severity>=HIGH, or if any alert has ERROR/CRITICAL priority. "
             "SUPPRESS only if confidence>=90 AND severity is LOW or MEDIUM AND no ERROR/CRITICAL alerts.\n\n"
 
-            "correlation_summary: Write 3-5 sentences. Include: (1) the exact rule names that fired and their "
-            "priorities; (2) the chronological sequence if multiple alerts — name the timestamps and the gap in "
-            "seconds between events; (3) what each step in the sequence represents from an attacker's perspective "
-            "(reconnaissance, lateral movement, persistence, exfiltration, etc.); (4) what the K8s context "
-            "adds — pod image, owner type (Job/Deployment), security context anomalies found by k8s_get_resources; "
-            "(5) what the K8s events show — any crashes, restarts, or OOM events that confirm or contradict "
-            "intentional activity; (6) whether Prometheus shows a CPU, memory, or network spike in the same "
-            "window. If multiple workloads are affected, correlate across them.\n\n"
+            "correlation_summary: Write an analytical paragraph, not a list of alerts. "
+            "Do not simply enumerate what fired — explain what the combination of alerts means. "
+            "Start by naming the attack pattern (e.g. 'file reconnaissance followed by persistence attempt', "
+            "'credential harvesting', 'lateral movement'). Then explain WHY the timing and sequence support "
+            "that conclusion: what does it mean that these specific rules fired on the same pod within this "
+            "time window? What does the K8s context (image, owner type, security context from k8s_get_resources) "
+            "add to the assessment? What do the K8s events tell us — does the absence of crashes confirm "
+            "deliberate activity? Does the Prometheus data corroborate or contradict the pattern? "
+            "End with the risk implication: what could happen next if this is a real intrusion and no action "
+            "is taken? Write 3-5 sentences. Do not use bullet points or numbered lists in this field.\n\n"
 
             "recommended_action: Write 3-5 specific, ordered steps for the analyst. "
             "Name the exact pod, the exact files or directories involved, and the specific commands or "
@@ -706,6 +708,15 @@ function switchTab(e, name) {
 }
 
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtAction(s) {
+  if (!s) return '<span style="color:#6e7681"> —</span>';
+  // Detect numbered list: "1. ... 2. ..." — split on the pattern and render as <ol>
+  const items = s.split(/(?=\d+\.\s)/).map(p => p.replace(/^\d+\.\s*/, '').trim()).filter(Boolean);
+  if (items.length > 1) {
+    return '<ol style="margin:6px 0 0 18px;padding:0">' + items.map(i => `<li>${esc(i)}</li>`).join('') + '</ol>';
+  }
+  return ': ' + esc(s);
+}
 function badgeCls(v) { return (v||'debug').toLowerCase().replace(/[^a-z]/g,''); }
 
 function renderRaw(d) {
@@ -767,7 +778,7 @@ function renderReport(d) {
     </div>
     ${evidence ? `<div class="report-section"><h4>Evidence</h4><ul class="evidence">${evidence}</ul></div>` : ''}
     ${anomalies ? `<div class="report-section"><h4>Prometheus Anomalies</h4><ul class="evidence">${anomalies}</ul></div>` : ''}
-    <div class="action">Recommended action: ${esc(d.recommended_action)}</div>
+    <div class="action"><strong>Recommended action</strong>${fmtAction(d.recommended_action)}</div>
     ${d.suppression_reason ? `<p class="suppression">Suppression reason: ${esc(d.suppression_reason)}</p>` : ''}
     <details><summary>Full JSON</summary><pre>${esc(JSON.stringify(d, null, 2))}</pre></details>
   </div>`;
