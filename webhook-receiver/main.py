@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import asyncio
 import datetime
 import json
+import urllib.parse
 import urllib.request as _urlreq
 import uuid
 
@@ -23,12 +24,16 @@ _AGENT_A2A_URL = (
     "/api/a2a/kagent/triage-agent"
 )
 
-# Namespaces where false-positive system alerts originate — excluded from the
-# triage buffer so the agent only sees user-workload alerts.
+# Namespaces where false-positive system alerts originate — excluded from both
+# the triage buffer AND the raw alerts UI so the demo stays focused on prod.
 _EXCLUDED_NAMESPACES = {
     "kagent", "falco", "falco-operator", "kube-system",
     "monitoring", "agentgateway-system", "demo",
 }
+
+_PROM_BASE = (
+    "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+)
 
 
 def _now() -> str:
@@ -55,13 +60,14 @@ async def receive_raw(request: Request):
 async def ingest(request: Request):
     body = await request.json()
     body["timestamp_received"] = _now()
-    # Always store in raw_alerts and broadcast to UI so all alerts are visible.
+    ns = (body.get("output_fields") or {}).get("k8s.ns.name", "")
+    # Filter system namespaces from both the UI and the triage buffer so the
+    # demo only shows user-workload alerts (kagent-postgresql etc. are noise).
+    if ns in _EXCLUDED_NAMESPACES:
+        return {"status": "ok"}
     raw_alerts.appendleft(body)
     await _broadcast("alert", json.dumps(body))
-    # Only add to the triage buffer if the alert is from a user workload namespace.
-    ns = (body.get("output_fields") or {}).get("k8s.ns.name", "")
-    if ns not in _EXCLUDED_NAMESPACES:
-        alert_buffer.append(body)
+    alert_buffer.append(body)
     return {"status": "ok"}
 
 
@@ -113,9 +119,70 @@ async def sse_stream(request: Request):
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
+# ─── Prometheus helper ────────────────────────────────────────────────────────
+
+def _prom_range_max_sync(query: str, lookback_minutes: int = 10) -> float | None:
+    """Runs a PromQL range query over the last N minutes; returns max value or None."""
+    now = datetime.datetime.utcnow().timestamp()
+    start = now - lookback_minutes * 60
+    url = (
+        f"{_PROM_BASE}/api/v1/query_range"
+        f"?query={urllib.parse.quote(query)}"
+        f"&start={start:.0f}&end={now:.0f}&step=15"
+    )
+    try:
+        with _urlreq.urlopen(_urlreq.Request(url), timeout=5) as r:
+            data = json.loads(r.read())
+        values = [
+            float(v[1])
+            for series in data.get("data", {}).get("result", [])
+            for v in series.get("values", [])
+            if v[1] not in ("NaN", "+Inf", "-Inf")
+        ]
+        return max(values) if values else None
+    except Exception:
+        return None
+
+
+def _get_pod_metrics_sync(pod: str, namespace: str) -> dict:
+    cpu_peak = _prom_range_max_sync(
+        f'rate(container_cpu_usage_seconds_total{{pod="{pod}",namespace="{namespace}",container!=""}}[30s])'
+    )
+    mem_peak = _prom_range_max_sync(
+        f'container_memory_working_set_bytes{{pod="{pod}",namespace="{namespace}",container!=""}}'
+    )
+    net_peak = _prom_range_max_sync(
+        f'rate(container_network_transmit_bytes_total{{pod="{pod}"}}[30s])'
+    )
+
+    def _fmt_bytes(b: float | None) -> str:
+        if b is None:
+            return "no data"
+        for unit in ("B", "KB", "MB", "GB"):
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} TB"
+
+    return {
+        "pod": pod,
+        "namespace": namespace,
+        "query_window": "last 10 minutes",
+        "cpu_peak_cores": round(cpu_peak, 6) if cpu_peak is not None else None,
+        "memory_peak": _fmt_bytes(mem_peak),
+        "network_tx_peak": _fmt_bytes(net_peak) + "/s" if net_peak is not None else "no data",
+        "note": (
+            "No metrics found — pod may have exited before Prometheus scraped it"
+            if cpu_peak is None and mem_peak is None
+            else "Metrics captured from Prometheus cadvisor scrapes"
+        ),
+    }
+
+
 # ─── MCP STREAMABLE_HTTP endpoint ─────────────────────────────────────────────
-# Exposes get_alert_buffer and post_triage_result as MCP tools so kagent's
-# triage-agent can read the alert window and post results without a separate sidecar.
+# Exposes get_alert_buffer, get_pod_metrics, and post_triage_result as MCP tools
+# so kagent's triage-agent can read the alert window, query Prometheus, and post
+# results — all without requiring external HTTP tool CRDs.
 
 _MCP_TOOLS = [
     {
@@ -125,6 +192,22 @@ _MCP_TOOLS = [
             "the last triage cycle. Returns a JSON array. Call this first."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_pod_metrics",
+        "description": (
+            "Queries in-cluster Prometheus for CPU, memory, and network metrics "
+            "of a specific pod over the last 10 minutes. "
+            "Call this after k8s_get_resources to detect resource anomalies."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pod": {"type": "string", "description": "Pod name"},
+                "namespace": {"type": "string", "description": "Namespace"},
+            },
+            "required": ["pod", "namespace"],
+        },
     },
     {
         "name": "post_triage_result",
@@ -205,6 +288,11 @@ async def mcp_endpoint(request: Request):
                 key = (a.get("rule", ""), a.get("output_fields", {}).get("k8s.pod.name", ""))
                 a["_repeat_count"] = seen[key]
             result = {"content": [{"type": "text", "text": json.dumps(deduped[:25])}]}
+        elif tool_name == "get_pod_metrics":
+            pod = arguments.get("pod", "")
+            namespace = arguments.get("namespace", "prod")
+            metrics = await asyncio.to_thread(_get_pod_metrics_sync, pod, namespace)
+            result = {"content": [{"type": "text", "text": json.dumps(metrics)}]}
         elif tool_name == "post_triage_result":
             triage_reports.appendleft(arguments)
             alert_buffer.clear()
@@ -402,12 +490,22 @@ function renderReport(d) {
   const conf = d.confidence || 0;
   const fillCls = conf >= 70 ? '' : conf >= 40 ? 'mid' : 'low-conf';
 
-  const wls = (d.affected_workloads || []).map(w => `
+  const wls = (d.affected_workloads || []).map(w => {
+    const timelineHtml = (w.alert_timeline || []).map(t => {
+      if (typeof t === 'string') return `<div class="timeline-item">› ${esc(t)}</div>`;
+      const ts = t.time || t.timestamp || '';
+      const typ = t.type || t.priority || '';
+      return `<div class="timeline-item">› <span class="badge ${badgeCls(typ)}" style="font-size:9px;padding:1px 5px">${esc(typ)}</span> ${esc(ts)}</div>`;
+    }).join('');
+    const desc = w.alert_timeline_description || '';
+    return `
     <div class="workload-block">
       <div class="workload-name">${esc(w.pod)} <span style="color:#6e7681">/ ${esc(w.namespace)}</span></div>
       <div class="workload-image">${esc(w.image)}</div>
-      ${(w.alert_timeline||[]).map(t => `<div class="timeline-item">› ${esc(t)}</div>`).join('')}
-    </div>`).join('');
+      ${timelineHtml}
+      ${desc ? `<div style="font-size:11px;color:#6e7681;margin-top:4px;font-style:italic">${esc(desc)}</div>` : ''}
+    </div>`;
+  }).join('');
 
   const evidence = (d.evidence || []).map(e => `<li>${esc(e)}</li>`).join('');
   const anomalies = (d.prometheus_anomalies || []).map(a => `<li>${esc(a)}</li>`).join('');
@@ -467,9 +565,12 @@ es.onerror = () => {
 };
 es.addEventListener('alert', ev => {
   const d = JSON.parse(ev.data);
-  rawCount++; bufferCount++;
+  rawCount++;
   document.getElementById('raw-count').textContent = rawCount;
-  document.getElementById('buffer-count').textContent = bufferCount;
+  // Buffer count is tracked server-side; fetch the real count
+  fetch('/history').then(r=>r.json()).then(h=>{
+    document.getElementById('buffer-count').textContent = h.buffer_count || 0;
+  });
   const c = document.getElementById('raw-container');
   if (c.querySelector('.empty-state')) c.innerHTML = '';
   c.insertAdjacentHTML('afterbegin', renderRaw(d));

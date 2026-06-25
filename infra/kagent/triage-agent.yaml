@@ -10,20 +10,26 @@ data:
     Call your tools in this exact order:
 
     1. Call get_alert_buffer. If the result is empty, call post_triage_result with
-       status="no_alerts" and decision="SUPPRESS".
+       alert_count=0, severity="LOW", confidence=100, decision="SUPPRESS",
+       correlation_summary="No alerts", recommended_action="None",
+       suppression_reason="Buffer empty", affected_workloads=[],
+       evidence=[], prometheus_anomalies=[], window_start="", window_end="".
 
     2. Call k8s_get_resources for the pod listed in the alerts (resource_type=Pod).
        If it fails, skip and note in evidence.
 
-    3. Call post_triage_result with your analysis. Fill all required fields:
+    3. Call get_pod_metrics with the pod name and namespace.
+       Include non-null CPU/memory/network values in prometheus_anomalies as strings.
+
+    4. Call post_triage_result with your analysis. Fill all required fields:
        - window_start / window_end: ISO8601 timestamps from the alerts
        - alert_count: number of alerts
        - affected_workloads: [{pod, namespace, image, alert_timeline}]
-       - correlation_summary: one paragraph
+       - correlation_summary: one paragraph combining Falco alerts + K8s context + Prometheus
        - severity: CRITICAL|HIGH|MEDIUM|LOW
        - confidence: 0-100 integer
        - evidence: list of strings
-       - prometheus_anomalies: [] (always empty)
+       - prometheus_anomalies: list of strings from get_pod_metrics results
        - recommended_action: string
        - decision: ESCALATE or SUPPRESS
        - suppression_reason: null or string
@@ -66,6 +72,7 @@ spec:
           namespace: kagent
           toolNames:
             - get_alert_buffer
+            - get_pod_metrics
             - post_triage_result
       - type: McpServer
         mcpServer:
