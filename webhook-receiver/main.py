@@ -567,9 +567,11 @@ def _invoke_agent_sync() -> None:
         headers={"Content-Type": "application/json"},
     )
     try:
-        with _urlreq.urlopen(req, timeout=180) as resp:
+        with _urlreq.urlopen(req, timeout=300) as resp:
             body = resp.read()
         _log.info("TRIGGER: A2A call completed (%d bytes)", len(body))
+    except __import__("urllib.error", fromlist=["URLError"]).URLError as exc:
+        _log.warning("TRIGGER: A2A call failed — %s", exc.reason)
     except Exception as exc:
         _log.warning("TRIGGER: A2A call failed — %s", exc)
 

@@ -170,7 +170,7 @@ scenario-b:
 	@kubectl delete job event-generator -n prod --ignore-not-found
 	@kubectl apply -f scenarios/scenario-b/event-generator.yaml
 	@echo "Three-stage attack sequence started (9 seconds total)."
-	@echo "Watch the Triage Reports tab at http://localhost:8080 — report appears within 30s."
+	@echo "Watch the Triage Reports tab at http://localhost:8080 — report appears within 90-150s (LLM inference time)."
 	@echo "Tailing webhook-receiver logs (Ctrl+C to stop) ..."
 	@kubectl logs -n demo -l app=webhook-receiver --tail=0 -f
 
