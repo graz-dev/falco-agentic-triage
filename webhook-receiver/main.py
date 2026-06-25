@@ -193,7 +193,7 @@ def _get_pod_events_sync(pod: str, namespace: str) -> dict:
         ssl_ctx = ssl.create_default_context(cafile=str(_SA_CA))
         qs = (
             f"fieldSelector=involvedObject.name%3D{urllib.parse.quote(pod)}"
-            f"&limit=20"
+            f"&limit=5"
         )
         url = f"{_K8S_API}/api/v1/namespaces/{urllib.parse.quote(namespace)}/events?{qs}"
         req = _urlreq.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -203,9 +203,8 @@ def _get_pod_events_sync(pod: str, namespace: str) -> dict:
             {
                 "type": e.get("type", ""),
                 "reason": e.get("reason", ""),
-                "message": (e.get("message") or "")[:300],
+                "message": (e.get("message") or "")[:120],
                 "count": e.get("count", 1),
-                "last_time": e.get("lastTimestamp") or e.get("eventTime") or "",
             }
             for e in data.get("items", [])
         ]
@@ -268,9 +267,11 @@ _MCP_TOOLS = [
     {
         "name": "post_triage_result",
         "description": (
-            "Posts the completed triage report to the UI and flushes the alert buffer. "
-            "Call this last after producing the JSON report. "
-            "Pass the full triage report object as the tool arguments."
+            "Submits your security triage analysis. Call this as a tool — do not write it as text. "
+            "Set severity=HIGH if any alert has ERROR priority or if 2+ different rule types fired on the same pod. "
+            "Set decision=ESCALATE if confidence<70 or any alert has ERROR priority. "
+            "Never recommend remediation actions (no pod deletion, network policy changes, secret rotation). "
+            "Calling this tool flushes the alert buffer."
         ),
         "inputSchema": {
             "type": "object",
@@ -383,6 +384,7 @@ async def mcp_endpoint(request: Request):
 
 # ─── 30-second triage trigger ─────────────────────────────────────────────────
 
+
 def _invoke_agent_sync() -> None:
     """Blocking HTTP call to kagent A2A endpoint — runs in a thread pool."""
     payload = json.dumps({
@@ -390,11 +392,15 @@ def _invoke_agent_sync() -> None:
         "id": str(uuid.uuid4()),
         "method": "message/send",
         "params": {
+            # New sessionId each trigger so kagent starts a fresh conversation.
+            # Without this, kagent appends to the same session and the accumulated
+            # conversation history grows until the model loses its tool-calling behaviour.
+            "sessionId": str(uuid.uuid4()),
             "message": {
                 "messageId": str(uuid.uuid4()),
                 "role": "user",
                 "parts": [{"kind": "text", "text": "Run triage cycle now."}],
-            }
+            },
         },
     }).encode()
     req = _urlreq.Request(
@@ -561,8 +567,8 @@ function renderReport(d) {
     const desc = w.alert_timeline_description || '';
     return `
     <div class="workload-block">
-      <div class="workload-name">${esc(w.pod)} <span style="color:#6e7681">/ ${esc(w.namespace)}</span></div>
-      <div class="workload-image">${esc(w.image)}</div>
+      <div class="workload-name">${esc(w.pod||w.k8s_pod_name)} <span style="color:#6e7681">/ ${esc(w.namespace||w.k8s_ns_name)}</span></div>
+      <div class="workload-image">${esc(w.image||w.image_repository)}</div>
       ${timelineHtml}
       ${desc ? `<div style="font-size:11px;color:#6e7681;margin-top:4px;font-style:italic">${esc(desc)}</div>` : ''}
     </div>`;
