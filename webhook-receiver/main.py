@@ -406,30 +406,12 @@ _MCP_TOOLS = [
             "ESCALATE if confidence<70, if severity>=HIGH, or if any alert has ERROR/CRITICAL priority. "
             "SUPPRESS only if confidence>=90 AND severity is LOW or MEDIUM AND no ERROR/CRITICAL alerts.\n\n"
 
-            "correlation_summary: Write an analytical paragraph, not a list of alerts. "
-            "Do not simply enumerate what fired — explain what the combination of alerts means. "
-            "Start by naming the attack pattern (e.g. 'file reconnaissance followed by persistence attempt', "
-            "'credential harvesting', 'lateral movement'). Then explain WHY the timing and sequence support "
-            "that conclusion: what does it mean that these specific rules fired on the same pod within this "
-            "time window? What does the K8s context (image, owner type, security context from k8s_get_resources) "
-            "add to the assessment? What do the K8s events tell us — does the absence of crashes confirm "
-            "deliberate activity? Does the Prometheus data corroborate or contradict the pattern? "
-            "End with the risk implication: what could happen next if this is a real intrusion and no action "
-            "is taken? Write 3-5 sentences. Do not use bullet points or numbered lists in this field.\n\n"
+            "correlation_summary: Two paragraphs (see system prompt for format). No bullet points.\n\n"
 
-            "recommended_action: Write 3-5 specific, ordered steps for the analyst. "
-            "Name the exact pod, the exact files or directories involved, and the specific commands or "
-            "dashboards to check. For example: '1. Run kubectl exec -n prod <pod> -- ls -la /etc/ to see "
-            "what was written. 2. Check kubectl logs -n prod <pod> for the full command line. "
-            "3. Verify whether the Job spec was submitted by an authorized user via audit logs. "
-            "4. Preserve pod filesystem with kubectl cp before the pod terminates.' "
-            "Do NOT recommend pod deletion, network policy changes, or secret rotation — those are "
-            "remediation actions reserved for the IR team after human review.\n\n"
-
-            "evidence: List every concrete data point that supports the severity assessment. "
-            "Each item should be a single sentence naming the specific artifact "
-            "(e.g. 'Read sensitive file untrusted at 16:25:41 UTC — /etc/shadow accessed by PID 42'). "
-            "Include at least one item per alert, one per K8s event finding, and one per Prometheus anomaly."
+            "recommended_action: 3-5 numbered investigation steps naming the exact pod, files, and kubectl commands. "
+            "Do NOT recommend pod deletion, network policy changes, secret rotation, or RBAC changes — "
+            "those are remediation actions for the IR team after human review.\n\n"
+            "evidence: One sentence per alert, per K8s event finding, and per Prometheus anomaly."
         ),
         "inputSchema": {
             "type": "object",
@@ -774,7 +756,7 @@ function renderReport(d) {
     ${wls ? `<div class="report-section"><h4>Affected Workloads</h4>${wls}</div>` : ''}
     <div class="report-section">
       <h4>Correlation Summary</h4>
-      <p class="narrative">${esc(d.correlation_summary)}</p>
+      ${(d.correlation_summary||'').split(/\n+|(?=Paragraph \d+:)/i).filter(Boolean).map(p=>`<p class="narrative">${esc(p.replace(/^Paragraph \d+:\s*/i,'').trim())}</p>`).filter(p=>p!='<p class="narrative"></p>').join('')}
     </div>
     ${evidence ? `<div class="report-section"><h4>Evidence</h4><ul class="evidence">${evidence}</ul></div>` : ''}
     ${anomalies ? `<div class="report-section"><h4>Prometheus Anomalies</h4><ul class="evidence">${anomalies}</ul></div>` : ''}

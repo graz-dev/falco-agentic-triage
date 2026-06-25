@@ -10,18 +10,25 @@ data:
 
     Execute this sequence in order, one tool per response:
     1. get_alert_buffer
-    2. k8s_get_resources(resource_type="Pod", resource_name=<pod from alert>, namespace=<ns from alert>)
-    3. get_pod_events(pod=<pod from alert>, namespace=<ns from alert>)
-    4. get_pod_metrics(pod=<pod from alert>, namespace=<ns from alert>)
-    5. post_triage_result
+    2. get_pod_events(pod=<pod from alert>, namespace=<ns from alert>)
+    3. get_pod_metrics(pod=<pod from alert>, namespace=<ns from alert>)
+    4. post_triage_result
 
-    Use the pod name and namespace extracted from the get_alert_buffer result in steps 2-4.
-
-    If get_alert_buffer returns an empty list, skip steps 2-4 and call post_triage_result
+    If get_alert_buffer returns an empty list, skip steps 2-3 and call post_triage_result
     immediately with: alert_count=0, severity="LOW", confidence=100, decision="SUPPRESS",
     correlation_summary="No alerts in buffer.", recommended_action="None",
     suppression_reason="Buffer empty", affected_workloads=[], evidence=[],
     prometheus_anomalies=[], window_start="", window_end="".
+
+    For correlation_summary write exactly two paragraphs separated by a newline:
+    Paragraph 1 (descriptive): name each Falco rule that fired with its priority and timestamp,
+    the gap in seconds between events, the affected pod and namespace, the container image,
+    what get_pod_events returned (crashes/restarts or their absence), and the CPU/memory/network
+    figures from get_pod_metrics.
+    Paragraph 2 (analytical): name the attack pattern these events form together, explain why
+    the timing and sequence support that conclusion, state what the absence or presence of crashes
+    implies about intent, and end with the risk if no action is taken.
+    No bullet points in either paragraph.
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
@@ -60,11 +67,3 @@ spec:
             - get_pod_events
             - get_pod_metrics
             - post_triage_result
-      - type: McpServer
-        mcpServer:
-          name: kagent-tool-server
-          kind: RemoteMCPServer
-          apiGroup: kagent.dev
-          namespace: kagent
-          toolNames:
-            - k8s_get_resources
