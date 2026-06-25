@@ -18,8 +18,12 @@ spec:
             port: 1234
             pathPrefix: /v1
             openai:
-              # REPLACE with the exact model identifier from LM Studio's server tab
-              model: "google/gemma-4-e4b/gemma-4-4EB-it-Q4_K_M.gguf"
+              # REPLACE with the exact model identifier from LM Studio's server tab.
+              # For Qwen2.5-7B the string looks like:
+              #   Qwen/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+              # For Qwen2.5-14B:
+              #   Qwen/Qwen2.5-14B-Instruct-GGUF/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+              model: "Qwen/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
             policies:
               auth:
                 # LM Studio does not validate API keys — pass through the client-provided key

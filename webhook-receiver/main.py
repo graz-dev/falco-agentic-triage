@@ -332,14 +332,40 @@ _MCP_TOOLS = [
     {
         "name": "post_triage_result",
         "description": (
-            "Submits your security triage analysis. Call this as a tool — do not write it as text. "
-            "Set severity=HIGH if any alert has ERROR priority or if 2+ different rule types fired on the same pod. "
-            "Set decision=ESCALATE if confidence<70 or any alert has ERROR priority. "
-            "recommended_action must be a specific investigation step for the analyst "
-            "(e.g. 'Review /etc/ modifications on event-generator-abc, check for lateral movement to webapp'). "
-            "Do NOT recommend pod deletion, network policy changes, or secret rotation. "
-            "affected_workloads must include pod, namespace, image, and alert_timeline fields. "
-            "Calling this tool flushes the alert buffer."
+            "Submits the completed triage report. Must be called as a tool — never written as text. "
+            "Calling this tool flushes the alert buffer.\n\n"
+
+            "SEVERITY rules: "
+            "CRITICAL if 3+ different rule types on the same pod in one window, or any CRITICAL-priority alert. "
+            "HIGH if any ERROR-priority alert or 2+ different rule types on the same pod. "
+            "MEDIUM if a single WARNING. LOW only for noise or expected activity.\n\n"
+
+            "DECISION rules: "
+            "ESCALATE if confidence<70, if severity>=HIGH, or if any alert has ERROR/CRITICAL priority. "
+            "SUPPRESS only if confidence>=90 AND severity is LOW or MEDIUM AND no ERROR/CRITICAL alerts.\n\n"
+
+            "correlation_summary: Write 3-5 sentences. Include: (1) the exact rule names that fired and their "
+            "priorities; (2) the chronological sequence if multiple alerts — name the timestamps and the gap in "
+            "seconds between events; (3) what each step in the sequence represents from an attacker's perspective "
+            "(reconnaissance, lateral movement, persistence, exfiltration, etc.); (4) what the K8s context "
+            "adds — pod image, owner type (Job/Deployment), security context anomalies found by k8s_get_resources; "
+            "(5) what the K8s events show — any crashes, restarts, or OOM events that confirm or contradict "
+            "intentional activity; (6) whether Prometheus shows a CPU, memory, or network spike in the same "
+            "window. If multiple workloads are affected, correlate across them.\n\n"
+
+            "recommended_action: Write 3-5 specific, ordered steps for the analyst. "
+            "Name the exact pod, the exact files or directories involved, and the specific commands or "
+            "dashboards to check. For example: '1. Run kubectl exec -n prod <pod> -- ls -la /etc/ to see "
+            "what was written. 2. Check kubectl logs -n prod <pod> for the full command line. "
+            "3. Verify whether the Job spec was submitted by an authorized user via audit logs. "
+            "4. Preserve pod filesystem with kubectl cp before the pod terminates.' "
+            "Do NOT recommend pod deletion, network policy changes, or secret rotation — those are "
+            "remediation actions reserved for the IR team after human review.\n\n"
+
+            "evidence: List every concrete data point that supports the severity assessment. "
+            "Each item should be a single sentence naming the specific artifact "
+            "(e.g. 'Read sensitive file untrusted at 16:25:41 UTC — /etc/shadow accessed by PID 42'). "
+            "Include at least one item per alert, one per K8s event finding, and one per Prometheus anomaly."
         ),
         "inputSchema": {
             "type": "object",

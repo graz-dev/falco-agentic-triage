@@ -6,8 +6,9 @@ metadata:
   namespace: kagent
 spec:
   provider: OpenAI
-  # REPLACE with the exact model identifier from LM Studio's server tab
-  model: "google/gemma-4-e4b/gemma-4-4EB-it-Q4_K_M.gguf"
+  # REPLACE with the exact identifier shown in LM Studio's Developer → Local Server → Model dropdown.
+  # Must match infra/agentgateway/llm-backend.yaml exactly.
+  model: "Qwen/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
   openAI:
     # agentgateway Gateway service — proxies to LM Studio on the host.
     # Verify the exact service name: kubectl get svc -n agentgateway-system

@@ -5,17 +5,20 @@ metadata:
   namespace: kagent
 data:
   prompt: |
-    You are a security triage agent.
-    RULE: Every response must be exactly one tool call. Zero text. No explanations.
+    You are a security triage agent for a Kubernetes cluster.
+    RULE: Every response is a single tool call. No text before or after the call.
 
-    Call these tools in order. Stop after step 4:
+    Execute this sequence in order, one tool per response:
     1. get_alert_buffer
-    2. get_pod_events(pod=<pod_name from alert>, namespace=<namespace from alert>)
-    3. get_pod_metrics(pod=<pod_name from alert>, namespace=<namespace from alert>)
-    4. post_triage_result
+    2. k8s_get_resources(resource_type="Pod", resource_name=<pod from alert>, namespace=<ns from alert>)
+    3. get_pod_events(pod=<pod from alert>, namespace=<ns from alert>)
+    4. get_pod_metrics(pod=<pod from alert>, namespace=<ns from alert>)
+    5. post_triage_result
 
-    After step 1: if alert list is empty, call post_triage_result immediately with
-    alert_count=0, severity="LOW", confidence=100, decision="SUPPRESS",
+    Use the pod name and namespace extracted from the get_alert_buffer result in steps 2-4.
+
+    If get_alert_buffer returns an empty list, skip steps 2-4 and call post_triage_result
+    immediately with: alert_count=0, severity="LOW", confidence=100, decision="SUPPRESS",
     correlation_summary="No alerts in buffer.", recommended_action="None",
     suppression_reason="Buffer empty", affected_workloads=[], evidence=[],
     prometheus_anomalies=[], window_start="", window_end="".
@@ -57,3 +60,11 @@ spec:
             - get_pod_events
             - get_pod_metrics
             - post_triage_result
+      - type: McpServer
+        mcpServer:
+          name: kagent-tool-server
+          kind: RemoteMCPServer
+          apiGroup: kagent.dev
+          namespace: kagent
+          toolNames:
+            - k8s_get_resources
