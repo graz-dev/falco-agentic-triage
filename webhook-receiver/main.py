@@ -499,7 +499,7 @@ async def mcp_endpoint(request: Request):
                 seen[key] += 1
             for s in summary:
                 s["repeat_count"] = seen[(s["rule"], s["pod"])]
-            result = {"content": [{"type": "text", "text": json.dumps(summary[:15])}]}
+            result = {"content": [{"type": "text", "text": json.dumps(summary[:8])}]}
         elif tool_name == "get_pod_events":
             pod = arguments.get("pod", "")
             namespace = arguments.get("namespace", "prod")
@@ -541,6 +541,9 @@ async def mcp_endpoint(request: Request):
 # ─── 30-second triage trigger ─────────────────────────────────────────────────
 
 
+_log = __import__("logging").getLogger("uvicorn.error")
+
+
 def _invoke_agent_sync() -> None:
     """Blocking HTTP call to kagent A2A endpoint — runs in a thread pool."""
     payload = json.dumps({
@@ -548,9 +551,8 @@ def _invoke_agent_sync() -> None:
         "id": str(uuid.uuid4()),
         "method": "message/send",
         "params": {
-            # New sessionId each trigger so kagent starts a fresh conversation.
-            # Without this, kagent appends to the same session and the accumulated
-            # conversation history grows until the model loses its tool-calling behaviour.
+            # Fresh sessionId per trigger — kagent reuses sessions by default,
+            # causing context accumulation that breaks function-calling after ~10 cycles.
             "sessionId": str(uuid.uuid4()),
             "message": {
                 "messageId": str(uuid.uuid4()),
@@ -566,27 +568,33 @@ def _invoke_agent_sync() -> None:
     )
     try:
         with _urlreq.urlopen(req, timeout=180) as resp:
-            resp.read()
-    except Exception:
-        pass  # silently ignore — agent may not be ready yet
+            body = resp.read()
+        _log.info("TRIGGER: A2A call completed (%d bytes)", len(body))
+    except Exception as exc:
+        _log.warning("TRIGGER: A2A call failed — %s", exc)
 
 
 async def _triage_trigger_loop() -> None:
-    """Polls alert_buffer every 30 s; triggers kagent triage-agent when alerts are buffered.
-    After triggering, waits 120 s before the next trigger to avoid overwhelming the local LLM.
-    """
+    """Polls alert_buffer every 30 s; triggers kagent triage-agent when alerts are buffered."""
     global _agent_busy
-    await asyncio.sleep(60)  # initial delay to let kagent finish starting up
+    _log.info("TRIGGER: loop starting (60s initial delay)")
+    await asyncio.sleep(60)
     while True:
         await asyncio.sleep(30)
-        if alert_buffer and not _agent_busy:
+        buf_len = len(alert_buffer)
+        if buf_len > 0 and not _agent_busy:
+            _log.info("TRIGGER: buffer has %d alerts — invoking triage agent", buf_len)
             _agent_busy = True
             try:
                 await asyncio.to_thread(_invoke_agent_sync)
             finally:
                 _agent_busy = False
-            # Post-trigger cooldown: give the LLM time to complete before re-triggering.
-            await asyncio.sleep(120)
+            _log.info("TRIGGER: agent cycle complete — waiting 60s cooldown")
+            await asyncio.sleep(60)
+        elif buf_len > 0 and _agent_busy:
+            _log.info("TRIGGER: buffer has %d alerts but agent already busy — skipping", buf_len)
+        else:
+            _log.debug("TRIGGER: buffer empty — nothing to do")
 
 
 @app.on_event("startup")
