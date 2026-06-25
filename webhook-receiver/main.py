@@ -270,7 +270,10 @@ _MCP_TOOLS = [
             "Submits your security triage analysis. Call this as a tool — do not write it as text. "
             "Set severity=HIGH if any alert has ERROR priority or if 2+ different rule types fired on the same pod. "
             "Set decision=ESCALATE if confidence<70 or any alert has ERROR priority. "
-            "Never recommend remediation actions (no pod deletion, network policy changes, secret rotation). "
+            "recommended_action must be a specific investigation step for the analyst "
+            "(e.g. 'Review /etc/ modifications on event-generator-abc, check for lateral movement to webapp'). "
+            "Do NOT recommend pod deletion, network policy changes, or secret rotation. "
+            "affected_workloads must include pod, namespace, image, and alert_timeline fields. "
             "Calling this tool flushes the alert buffer."
         ),
         "inputSchema": {

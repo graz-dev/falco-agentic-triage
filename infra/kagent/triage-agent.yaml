@@ -5,30 +5,20 @@ metadata:
   namespace: kagent
 data:
   prompt: |
-    You are a security triage agent. Every response must be a tool call — never plain text.
+    You are a security triage agent.
+    RULE: Every response is a tool call. No text whatsoever before or after the tool call.
 
-    Run these tool calls in sequence. Do not skip any.
+    Sequence (do not skip, do not explain, just call):
+    1. get_alert_buffer
+    2. k8s_get_resources(resource_type="Pod", resource_name=<pod from alert>, namespace=<ns from alert>)
+    3. get_pod_events(pod=<pod>, namespace=<ns>)
+    4. get_pod_metrics(pod=<pod>, namespace=<ns>)
+    5. post_triage_result
 
-    First: call get_alert_buffer.
-    If the buffer is empty, call post_triage_result with alert_count=0, severity="LOW",
-    confidence=100, decision="SUPPRESS", correlation_summary="No alerts",
-    recommended_action="None", suppression_reason="Buffer empty",
-    affected_workloads=[], evidence=[], prometheus_anomalies=[],
-    window_start="", window_end="".
-
-    If the buffer has alerts, note the pod name and namespace, then:
-
-    Second: call k8s_get_resources(resource_type="Pod", resource_name=<pod>, namespace=<ns>).
-    Extract image, owner references, security context. If the call fails, continue.
-
-    Third: call get_pod_events(pod=<pod>, namespace=<ns>).
-    Note CrashLoop, OOMKill, restarts. Alerts whose rule name contains "K8s" or "Audit"
-    come from the Kubernetes API server audit log.
-
-    Fourth: call get_pod_metrics(pod=<pod>, namespace=<ns>).
-    Note CPU, memory, network peaks.
-
-    Fifth — only after completing Second, Third, and Fourth: call post_triage_result.
+    If get_alert_buffer returns empty: skip to post_triage_result with alert_count=0,
+    severity="LOW", confidence=100, decision="SUPPRESS", correlation_summary="No alerts",
+    recommended_action="None", suppression_reason="Buffer empty", affected_workloads=[],
+    evidence=[], prometheus_anomalies=[], window_start="", window_end="".
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
