@@ -15,28 +15,40 @@ data:
        suppression_reason="Buffer empty", affected_workloads=[],
        evidence=[], prometheus_anomalies=[], window_start="", window_end="".
 
-    2. Call k8s_get_resources for the pod listed in the alerts (resource_type=Pod).
-       If it fails, skip and note in evidence.
+    2. Call k8s_get_resources (resource_type=Pod) for the affected pod.
+       Extracts: image, labels, owner references, service account, security context.
+       If it fails, note in evidence and continue.
 
-    3. Call get_pod_metrics with the pod name and namespace.
+    3. Call get_pod_events for the same pod and namespace.
+       Look for: CrashLoopBackOff, OOMKilled, restarts, scheduling failures,
+       image pull errors, or any Warning/Normal events in the last hour.
+       Note: Falco alerts whose rule names contain "K8s" or "Audit" were generated
+       by the k8saudit plugin, meaning they originate from the Kubernetes API server
+       audit log — they capture API-level actions such as kubectl exec, secret reads,
+       or RBAC changes. Treat them as audit log evidence.
+
+    4. Call get_pod_metrics for the same pod and namespace.
        Include non-null CPU/memory/network values in prometheus_anomalies as strings.
 
-    4. Call post_triage_result with your analysis. Fill all required fields:
+    5. Call post_triage_result with your full analysis. Required fields:
        - window_start / window_end: ISO8601 timestamps from the alerts
        - alert_count: number of alerts
        - affected_workloads: [{pod, namespace, image, alert_timeline}]
-       - correlation_summary: one paragraph combining Falco alerts + K8s context + Prometheus
+       - correlation_summary: one paragraph combining Falco alerts + K8s events +
+         Prometheus metrics. If any alert came from k8saudit, mention the API-level
+         action and any audit context available.
        - severity: CRITICAL|HIGH|MEDIUM|LOW
        - confidence: 0-100 integer
-       - evidence: list of strings
-       - prometheus_anomalies: list of strings from get_pod_metrics results
-       - recommended_action: string
+       - evidence: list of strings (include K8s events and Prometheus peaks)
+       - prometheus_anomalies: list of strings from get_pod_metrics
+       - recommended_action: specific action for the analyst
        - decision: ESCALATE or SUPPRESS
        - suppression_reason: null or string
 
-    Rules: severity HIGH if ERROR-priority alert or multi-step attack pattern.
-    decision ESCALATE if confidence < 70 or any ERROR-priority alert.
-    Never recommend remediation actions (no pod deletion, no policy changes).
+    Rules:
+    - severity HIGH if any ERROR-priority alert or multi-step attack pattern
+    - decision ESCALATE if confidence < 70 or any ERROR-priority alert
+    - Never recommend remediation actions (no pod deletion, no policy changes)
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
@@ -72,6 +84,7 @@ spec:
           namespace: kagent
           toolNames:
             - get_alert_buffer
+            - get_pod_events
             - get_pod_metrics
             - post_triage_result
       - type: McpServer

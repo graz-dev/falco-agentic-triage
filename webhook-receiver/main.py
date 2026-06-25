@@ -7,6 +7,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import asyncio
 import datetime
 import json
+import pathlib
+import ssl
 import urllib.parse
 import urllib.request as _urlreq
 import uuid
@@ -34,6 +36,9 @@ _EXCLUDED_NAMESPACES = {
 _PROM_BASE = (
     "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 )
+_K8S_API = "https://kubernetes.default.svc"
+_SA_TOKEN = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+_SA_CA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
 
 def _now() -> str:
@@ -179,6 +184,41 @@ def _get_pod_metrics_sync(pod: str, namespace: str) -> dict:
     }
 
 
+# ─── K8s Events helper ────────────────────────────────────────────────────────
+
+def _get_pod_events_sync(pod: str, namespace: str) -> dict:
+    """Fetches K8s Events for a pod via the in-cluster API using the mounted SA token."""
+    try:
+        token = _SA_TOKEN.read_text()
+        ssl_ctx = ssl.create_default_context(cafile=str(_SA_CA))
+        qs = (
+            f"fieldSelector=involvedObject.name%3D{urllib.parse.quote(pod)}"
+            f"&limit=20"
+        )
+        url = f"{_K8S_API}/api/v1/namespaces/{urllib.parse.quote(namespace)}/events?{qs}"
+        req = _urlreq.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with _urlreq.urlopen(req, context=ssl_ctx, timeout=5) as r:
+            data = json.loads(r.read())
+        events = [
+            {
+                "type": e.get("type", ""),
+                "reason": e.get("reason", ""),
+                "message": (e.get("message") or "")[:300],
+                "count": e.get("count", 1),
+                "last_time": e.get("lastTimestamp") or e.get("eventTime") or "",
+            }
+            for e in data.get("items", [])
+        ]
+        return {
+            "pod": pod,
+            "namespace": namespace,
+            "event_count": len(events),
+            "events": events,
+        }
+    except Exception as e:
+        return {"error": str(e), "pod": pod, "namespace": namespace, "events": []}
+
+
 # ─── MCP STREAMABLE_HTTP endpoint ─────────────────────────────────────────────
 # Exposes get_alert_buffer, get_pod_metrics, and post_triage_result as MCP tools
 # so kagent's triage-agent can read the alert window, query Prometheus, and post
@@ -194,11 +234,27 @@ _MCP_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_pod_events",
+        "description": (
+            "Fetches Kubernetes Events for a specific pod (CrashLoopBackOff, OOMKill, "
+            "restarts, scheduling failures, image pull errors). "
+            "Call this after k8s_get_resources for lifecycle context."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pod": {"type": "string", "description": "Pod name"},
+                "namespace": {"type": "string", "description": "Namespace"},
+            },
+            "required": ["pod", "namespace"],
+        },
+    },
+    {
         "name": "get_pod_metrics",
         "description": (
             "Queries in-cluster Prometheus for CPU, memory, and network metrics "
             "of a specific pod over the last 10 minutes. "
-            "Call this after k8s_get_resources to detect resource anomalies."
+            "Call this after get_pod_events to detect resource anomalies."
         ),
         "inputSchema": {
             "type": "object",
@@ -288,6 +344,11 @@ async def mcp_endpoint(request: Request):
                 key = (a.get("rule", ""), a.get("output_fields", {}).get("k8s.pod.name", ""))
                 a["_repeat_count"] = seen[key]
             result = {"content": [{"type": "text", "text": json.dumps(deduped[:25])}]}
+        elif tool_name == "get_pod_events":
+            pod = arguments.get("pod", "")
+            namespace = arguments.get("namespace", "prod")
+            events = await asyncio.to_thread(_get_pod_events_sync, pod, namespace)
+            result = {"content": [{"type": "text", "text": json.dumps(events)}]}
         elif tool_name == "get_pod_metrics":
             pod = arguments.get("pod", "")
             namespace = arguments.get("namespace", "prod")
@@ -432,7 +493,7 @@ _HTML = r"""<!DOCTYPE html>
   .confidence-fill.low-conf { background: #f85149; }
   .workload-block { background: #0d1117; border-radius: 4px; padding: 8px 10px; margin-bottom: 6px; }
   .workload-name { font-size: 13px; color: #e6edf3; font-weight: bold; }
-  .workload-image { font-size: 11px; color: #6e7681; margin-bottom: 4px; }
+  .workload-image { font-size: 11px; color: #6e7681; margin-top: 4px; margin-bottom: 6px; }
   .timeline-item { font-size: 11px; color: #8b949e; padding: 1px 0; }
 </style>
 </head>

@@ -142,6 +142,7 @@ _infra-webhook-receiver:
 	@docker save $(RECEIVER_IMAGE) | docker exec -i $(CLUSTER_NAME)-control-plane \
 		ctr --namespace=k8s.io images import -
 	@kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
+	@kubectl apply -f webhook-receiver/k8s/rbac.yaml
 	@kubectl apply -f webhook-receiver/k8s/deployment.yaml
 	@kubectl apply -f webhook-receiver/k8s/service.yaml
 	@kubectl rollout status deployment/webhook-receiver -n demo --timeout=2m

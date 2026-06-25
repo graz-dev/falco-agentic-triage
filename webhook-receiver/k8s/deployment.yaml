@@ -13,6 +13,7 @@ spec:
       labels:
         app: webhook-receiver
     spec:
+      serviceAccountName: webhook-receiver
       containers:
         - name: webhook-receiver
           image: webhook-receiver:latest

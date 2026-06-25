@@ -516,7 +516,75 @@ make scenario-b
 
 ---
 
-## 7. Design Decisions and Production-Ready Alternatives
+## 7. Why This Agent — Operator Value
+
+### What the agent replaces
+
+When a Falco alert fires without an agent, a SOC analyst must:
+
+1. Get paged — possibly at 3am — with a raw JSON blob from Falcosidekick
+2. Manually run `kubectl get pod`, `kubectl describe`, `kubectl get events`
+3. Open Grafana and build PromQL queries for the right pod and timeframe
+4. Recall what the alert rule means and whether it has fired before
+5. Cross-reference with other alerts to see if a multi-step pattern is forming
+6. Write up an incident summary and decide whether to wake the IR team
+
+This takes **15–30 minutes per alert**, requires deep Kubernetes familiarity,
+and degrades sharply with alert volume and analyst fatigue.
+
+### What the agent does instead
+
+Within 30–90 seconds of the alert window closing, the agent:
+
+| Step | Tool | What it learns |
+|------|------|----------------|
+| Fetch alert batch | `get_alert_buffer` | Rule names, priorities, timestamps, pod/namespace |
+| Pod metadata | `k8s_get_resources` | Image, labels, owner, service account, security context |
+| Lifecycle events | `get_pod_events` | CrashLoops, OOMKills, restart count, scheduling failures |
+| Resource metrics | `get_pod_metrics` | CPU/memory/network peaks during the alert window |
+| Submit report | `post_triage_result` | Structured ESCALATE/SUPPRESS with narrative |
+
+The analyst opens the UI and finds a pre-built report with a correlation
+narrative, a severity badge, a confidence score, and a specific recommended
+action. Their job becomes **validation**, not investigation.
+
+### Data sources and coverage
+
+| Source | How it reaches the agent | What it covers |
+|--------|--------------------------|----------------|
+| Falco syscall rules | `get_alert_buffer` | Runtime behaviour: file reads, shell spawns, network connections |
+| Falco k8saudit rules | `get_alert_buffer` | K8s API actions: kubectl exec, secret reads, RBAC changes. The k8saudit plugin bridges the K8s audit log into Falco alerts — rules with "K8s" in their name come from this pipeline |
+| K8s pod metadata | `k8s_get_resources` | Image provenance, labels, security context, owner chain |
+| K8s lifecycle events | `get_pod_events` | OOMKills, restarts, scheduling failures — context for whether the pod was already unhealthy |
+| Prometheus | `get_pod_metrics` | CPU/memory/network peaks correlated with the alert window |
+
+**What is not covered:** Raw audit log queries (user identity, source IP, exact
+API payload) would require a log aggregation pipeline (Loki, OpenSearch, Elastic).
+The k8saudit plugin covers the detection side; deep forensic enrichment of the
+caller identity is left to the IR team after escalation.
+
+### Quantified savings (rough order of magnitude)
+
+| Metric | Without agent | With agent |
+|--------|--------------|------------|
+| Time to first context | 15–30 min | 30–90 sec |
+| Alerts correlated per incident | 1 (each triaged separately) | All alerts in a 30s window |
+| Analyst skill required for initial triage | Senior (kubectl, PromQL, Falco rule knowledge) | Junior (review pre-built report) |
+| False positive escalation rate | High (analyst unsure → escalates to be safe) | Lower (agent provides corroborating evidence for SUPPRESS) |
+| Coverage at 3am | Depends on on-call quality | Consistent |
+
+### What the agent deliberately does not do
+
+- **No remediation.** The agent never deletes pods, changes network policies,
+  rotates secrets, or calls any mutating K8s API. Every ESCALATE decision
+  requires a human before any action is taken.
+- **No detection.** Falco does the detection. The agent only triages what Falco
+  already found.
+- **No tuning.** The agent does not modify Falco rules or suppress future alerts.
+
+---
+
+## 8. Design Decisions and Production Alternatives
 
 **Alert ingestion model:** The demo uses a polling model — the agent GETs `/buffer`
 every 30 seconds. For production: (a) a message queue (Redis Streams, NATS, Kafka)
@@ -564,7 +632,7 @@ Component), then the Helm release. Reversing this order orphans artifact finaliz
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 **Falco pod in CrashLoopBackOff**
 ```bash
@@ -626,7 +694,7 @@ pod may have restarted — check `make logs-receiver`.
 
 ---
 
-## 9. References
+## 10. References
 
 - Falco documentation: https://falco.org/docs/
 - Falco Operator: https://github.com/falcosecurity/falco-operator
