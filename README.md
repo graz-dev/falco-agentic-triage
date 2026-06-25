@@ -413,6 +413,56 @@ as a background service and does not require a GUI.
 
 ---
 
+### Model selection guide for MacBook Pro M2
+
+The demo works with Gemma4, but Gemma4 at 4B requires prompt engineering workarounds
+to achieve reliable tool-calling (see §8 for details). If you have the RAM budget,
+the models below are measurably more reliable for multi-step function-calling chains.
+
+**Recommended alternatives by RAM tier:**
+
+| RAM | Model | Ollama name | Tool-calling quality |
+|-----|-------|-------------|----------------------|
+| 8 GB | Qwen2.5-7B-Instruct | `qwen2.5:7b` | Good — significantly better than Gemma4 4B |
+| 8 GB | Phi-4-mini (3.8B) | `phi4-mini` | Good for small footprint |
+| 16 GB | Qwen2.5-14B-Instruct | `qwen2.5:14b` | Very good — recommended for this demo |
+| 16 GB | Phi-4 (14B) | `phi4` | Very good reasoning, strong schema adherence |
+| 16 GB | Gemma4 12B | `gemma4:12b` | Good — the prompt workarounds in this repo still apply |
+| 32 GB | Qwen2.5-32B-Instruct | `qwen2.5:32b` | Excellent — reliable at 5+ tool chains without prompt hacks |
+| 32 GB | Gemma4 27B | `gemma4:27b` | Excellent — context threshold moves to ~6 000 tokens |
+
+M2 Pro has 16–32 GB; M2 Max 32–64 GB; M2 Ultra 64–192 GB.
+
+**Why Qwen2.5 over Gemma4 at the same size?**
+Qwen2.5 was trained with explicit emphasis on structured output and function-calling.
+In practice, it rarely generates tool responses as free text, tolerates longer tool
+chains without drifting, and uses consistent field names across runs. For this demo's
+4-tool chain, Qwen2.5-7B is more reliable than Gemma4 12B despite being smaller.
+The context-length threshold and session-accumulation workarounds described in §8
+were developed specifically because Gemma4 was the chosen model; with Qwen2.5 or
+Phi-4 those workarounds become less critical (though still harmless to keep in place).
+
+**Switching models:**
+
+With LM Studio: download the model, load it, copy the exact identifier from the
+server tab, paste into `llm-backend.yaml` and `model-config.yaml`. Restart the
+agentgateway backend or run `kubectl rollout restart deployment/triage-agent -n kagent`.
+
+With Ollama:
+```bash
+ollama pull qwen2.5:14b
+# Update llm-backend.yaml: spec.llm.baseURL → http://host.docker.internal:11434/v1
+# Update model-config.yaml: spec.model → qwen2.5:14b
+kubectl apply -f infra/agentgateway/llm-backend.yaml
+kubectl apply -f infra/kagent/model-config.yaml
+kubectl rollout restart deployment/triage-agent -n kagent
+```
+
+The model identifier for Ollama is always the short name (`qwen2.5:14b`, `phi4`,
+etc.). For LM Studio it is the full GGUF path shown in the server tab.
+
+---
+
 ## 6. Scenarios
 
 ### Scenario A: Shell in Container
@@ -601,15 +651,53 @@ For production: swap the `AgentgatewayBackend` to point at a managed endpoint
 (Vertex AI, Bedrock, or self-hosted vLLM). Because the `ModelConfig` abstraction
 sits between the agent and the provider, no agent code changes are required.
 
-**LLM function-calling reliability:** The demo uses Gemma4 4EB (the smallest, most
-quantized variant). This model's tool-use reliability is non-deterministic — it
-occasionally generates the triage report as plain text rather than as a tool call.
-The system prompt is intentionally kept short (no embedded JSON schema) to maximize
-the probability of correct function-call formatting. If the agent fails to call
-`post_triage_result` in one cycle, the buffer remains non-empty and the trigger
-fires again within ~3 minutes. For production use, prefer Gemma4 12B or 27B (higher
-quantization → more reliable tool calling), or a model optimized for function calling
-such as Mistral 7B Instruct v0.3.
+**LLM function-calling reliability — lessons from development:** The demo was built
+and tested with Gemma4 running locally. Several non-obvious behaviors shaped the
+final implementation.
+
+*Context length is the main reliability lever.* At roughly 3 500 input tokens,
+Gemma4 (all sizes, including 12B) switches from emitting tool calls to generating
+the triage report as free text. The root cause is that the model has already
+assembled a complete mental answer from the accumulated tool results and "forgets"
+that it must submit that answer through a specific tool call. The fix applied here
+was to remove the `k8s_get_resources` step from the tool chain: the raw Pod JSON
+that kagent returns for that tool added approximately 1 200 tokens per cycle, which
+pushed the total context past the threshold. Pod image, namespace, and name are
+already present in the Falco alert payload, so the information is not lost.
+
+*Session accumulation is a silent failure mode.* kagent re-uses the same A2A
+`sessionId` across all triage cycles by default, so the conversation history grows
+with every cycle. After 8–10 cycles the context reaches 4 000+ tokens from the
+start of the session, and the model completely loses reliable function-calling
+behaviour. The fix is one line in the trigger: generate a fresh `uuid4()` as the
+`sessionId` for every A2A `message/send` call (see `_invoke_agent_sync` in
+`webhook-receiver/main.py`). This keeps each triage cycle independent with a clean
+context around 1 200 input tokens.
+
+*Short system prompt beats long schema.* Earlier versions of the prompt embedded
+the full triage JSON schema with field-by-field descriptions. With Gemma4, this
+reliably caused the model to produce the JSON as plain text (it treated the schema
+as a template to fill in rather than as a description of a tool to call). The
+current prompt contains no schema at all — field descriptions live in the
+`post_triage_result` tool description, which the model processes separately from
+the task instruction.
+
+*Tool arguments arrive as JSON strings.* Gemma4 follows the OpenAI function-calling
+convention where `function.arguments` is a JSON-encoded string (e.g.,
+`"{\"pod\":\"event-generator\"}"`) rather than a parsed object. The MCP
+`tools/call` spec expects a JSON object in `arguments`, but ADK passes the raw
+string. The webhook-receiver MCP handler detects this and parses the string before
+processing (see the `isinstance(arguments, str)` guard in `/mcp`).
+
+*Field naming is non-deterministic.* The same model, across different runs, uses
+`pod`, `pod_name`, `k8s_pod_name`, or `name` for the pod name field; and
+`namespace`, `namespace_name`, or `k8s.ns.name` for namespace. The
+`_normalize_report` function in `main.py` maps all observed variants to canonical
+fields so the UI always renders correctly regardless of which name the model chose.
+
+If the agent fails to call `post_triage_result` in one cycle, the buffer stays
+non-empty and the trigger fires again in approximately 30 seconds. The system
+self-corrects without manual intervention.
 
 **Agent triggering:** The 30-second fixed window is the core teaching point of
 this Refcard. For production: threshold-based triggering (N alerts in M seconds),
