@@ -219,10 +219,13 @@ def _get_pod_events_sync(pod: str, namespace: str) -> dict:
 
 
 # ─── MCP STREAMABLE_HTTP endpoint ─────────────────────────────────────────────
-def _normalize_report(raw: dict) -> dict:
-    """Normalize the model's post_triage_result arguments.
-    The model uses inconsistent field names and occasionally nests data incorrectly.
-    This function extracts canonical fields from whatever structure the model provides.
+def _normalize_report(raw: dict, current_buffer: list) -> dict:
+    """Normalize post_triage_result arguments and enforce hard business rules.
+
+    Two responsibilities:
+    1. Map every field name variant the model uses to the canonical schema.
+    2. Override severity/decision based on the actual alert buffer — the model
+       sometimes ignores tool-description rules (especially Coder models).
     """
     def _str(v, default=""):
         return str(v) if v is not None else default
@@ -238,13 +241,12 @@ def _normalize_report(raw: dict) -> dict:
             return v
         return []
 
-    # Normalize affected_workloads: the model uses many different field name patterns.
+    # Extract workloads from the model's output, handling all observed field names.
     raw_wl = _list(raw.get("affected_workloads"))
     workloads = []
     for w in raw_wl:
         if not isinstance(w, dict):
             continue
-        # Some runs nest data inside an "affected_workloads_list" sub-key
         if "affected_workloads_list" in w and not w.get("pod") and not w.get("name"):
             inner = w.get("affected_workloads_list", [])
             if inner and isinstance(inner, list) and isinstance(inner[0], dict):
@@ -259,26 +261,86 @@ def _normalize_report(raw: dict) -> dict:
         if isinstance(timeline, dict):
             timeline = (timeline.get("alerts") or timeline.get("events") or
                         timeline.get("alert_timeline") or [])
-        workloads.append({
-            "pod": pod,
-            "namespace": ns,
-            "image": image,
-            "alert_timeline": _list(timeline),
-        })
+        if pod:
+            workloads.append({
+                "pod": pod, "namespace": ns, "image": image,
+                "alert_timeline": _list(timeline),
+            })
+
+    # Fallback: if the model returned no workloads, reconstruct from the buffer.
+    if not workloads and current_buffer:
+        seen_pods: dict = {}
+        for a in current_buffer:
+            of = a.get("output_fields") or {}
+            pod = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
+            ns = of.get("k8s.ns.name") or of.get("k8s_ns_name") or ""
+            image = (of.get("container.image.repository") or
+                     of.get("container_image_repository") or "")
+            if pod and pod not in seen_pods:
+                seen_pods[pod] = {"pod": pod, "namespace": ns, "image": image,
+                                  "alert_timeline": []}
+            if pod:
+                ts = a.get("time") or a.get("timestamp_received", "")
+                rule = a.get("rule", "")
+                pri = a.get("priority", "")
+                seen_pods[pod]["alert_timeline"].append(f"{ts} {rule} ({pri})")
+        workloads = list(seen_pods.values())
+
+    # Derive ground-truth priority facts from the actual buffer — do not trust the model.
+    buf_priorities = {(a.get("priority") or "").upper() for a in current_buffer}
+    buf_rules = {a.get("rule", "") for a in current_buffer}
+    buf_pods: set = set()
+    for a in current_buffer:
+        of = a.get("output_fields") or {}
+        p = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
+        if p:
+            buf_pods.add(p)
+
+    # Count distinct rule types per pod (multi-step pattern detection).
+    rules_per_pod: dict = {}
+    for a in current_buffer:
+        of = a.get("output_fields") or {}
+        pod = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
+        rules_per_pod.setdefault(pod, set()).add(a.get("rule", ""))
+    max_rules_on_one_pod = max((len(v) for v in rules_per_pod.values()), default=0)
+
+    model_severity = _str(raw.get("severity"), "MEDIUM").upper()
+    model_decision = _str(raw.get("decision"), "ESCALATE").upper()
+    model_confidence = _int(raw.get("confidence"), 50)
+
+    # Hard override rules — these cannot be suppressed by the model's output.
+    _SEVERITY_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+    floor_severity = model_severity
+    if "CRITICAL" in buf_priorities:
+        floor_severity = "CRITICAL"
+    elif "ERROR" in buf_priorities or max_rules_on_one_pod >= 3:
+        floor_severity = max(floor_severity, "HIGH", key=lambda s: _SEVERITY_RANK.get(s, 0))
+    elif max_rules_on_one_pod >= 2:
+        floor_severity = max(floor_severity, "HIGH", key=lambda s: _SEVERITY_RANK.get(s, 0))
+
+    # Decision must be ESCALATE if: confidence < 70, or any ERROR/CRITICAL alert,
+    # or severity ended up HIGH or above.
+    must_escalate = (
+        model_confidence < 70
+        or "CRITICAL" in buf_priorities
+        or "ERROR" in buf_priorities
+        or _SEVERITY_RANK.get(floor_severity, 0) >= _SEVERITY_RANK["HIGH"]
+    )
+    final_decision = "ESCALATE" if must_escalate else model_decision
 
     report = {
         "window_start": _str(raw.get("window_start")),
         "window_end": _str(raw.get("window_end")),
-        "alert_count": _int(raw.get("alert_count")),
+        "alert_count": _int(raw.get("alert_count")) or len(current_buffer),
         "affected_workloads": workloads,
         "correlation_summary": _str(raw.get("correlation_summary")),
-        "severity": _str(raw.get("severity"), "MEDIUM"),
-        "confidence": _int(raw.get("confidence"), 50),
+        "severity": floor_severity,
+        "confidence": model_confidence,
         "evidence": _list(raw.get("evidence")),
         "prometheus_anomalies": _list(raw.get("prometheus_anomalies")),
         "recommended_action": _str(raw.get("recommended_action")),
-        "decision": _str(raw.get("decision"), "ESCALATE"),
-        "suppression_reason": raw.get("suppression_reason"),
+        "decision": final_decision,
+        "suppression_reason": raw.get("suppression_reason") if final_decision == "SUPPRESS" else None,
         "timestamp_received": _now(),
     }
     return report
@@ -465,7 +527,7 @@ async def mcp_endpoint(request: Request):
             metrics = await asyncio.to_thread(_get_pod_metrics_sync, pod, namespace)
             result = {"content": [{"type": "text", "text": json.dumps(metrics)}]}
         elif tool_name == "post_triage_result":
-            report = _normalize_report(arguments)
+            report = _normalize_report(arguments, list(alert_buffer))
             triage_reports.appendleft(report)
             alert_buffer.clear()
             await _broadcast("report", json.dumps(report))
