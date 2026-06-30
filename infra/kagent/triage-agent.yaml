@@ -14,7 +14,7 @@ data:
     STEP 2 — Evaluate the result of get_alert_buffer:
       - If the alert list is EMPTY: call post_triage_result immediately with
         alert_count=0, severity="LOW", confidence=100, decision="SUPPRESS",
-        affected_workloads=[], evidence=[], prometheus_anomalies=[],
+        affected_workloads=[], evidence=[],
         correlation_summary="No alerts in buffer.", recommended_action="None",
         suppression_reason="Buffer empty.", window_start="", window_end="".
         Then stop — do not call any other tool.
@@ -23,10 +23,8 @@ data:
     STEP 3 — Call get_pod_events(pod=<pod name from alert>, namespace=<namespace from alert>).
     Use the pod name and namespace from the first alert returned by get_alert_buffer.
 
-    STEP 4 — Call get_pod_metrics(pod=<same pod>, namespace=<same namespace>).
-
-    STEP 5 — Call post_triage_result with all fields populated from the data you collected
-    in steps 1, 3, and 4. Fill in:
+    STEP 4 — Call post_triage_result with all fields populated from the data you collected
+    in steps 1 and 3. Fill in:
       - affected_workloads: list of objects with pod, namespace, image, alert_timeline fields.
         Use the pod name, namespace, and image from get_alert_buffer. alert_timeline is a list
         of strings, each formatted as "<timestamp> <rule_name> (<priority>)".
@@ -34,8 +32,8 @@ data:
         exact pod, files, and kubectl commands. Example: "1. Run kubectl logs -n prod <pod>.
         2. Check kubectl exec -n prod <pod> -- ls -la /etc/. 3. Review audit logs."
       - correlation_summary: two paragraphs. Paragraph 1: describe the alerts (rules, priorities,
-        timestamps, gap in seconds, pod, image, events from get_pod_events, metrics from
-        get_pod_metrics). Paragraph 2: name the attack pattern, explain why the sequence and
+        timestamps, gap in seconds, pod, image, events from get_pod_events). Paragraph 2: name
+        the attack pattern, explain why the sequence and
         timing support it, state what the risk is if no action is taken.
 
     Do not repeat any tool call. Do not add text outside tool calls.
@@ -49,10 +47,10 @@ spec:
   description: >
     First-level Falco alert triage agent. Triggered every 30 seconds by the
     webhook-receiver when the alert buffer is non-empty. Correlates alerts with
-    K8s metadata and Prometheus metrics, then posts a structured triage report.
+    K8s metadata and pod events, then posts a structured triage report.
   type: Declarative
   declarative:
-    modelConfig: gemma4-local
+    modelConfig: local-llm
     systemMessageFrom:
       name: triage-agent-prompt
       key: prompt
@@ -63,7 +61,7 @@ spec:
         - name: triage
           description: >
             Runs one Falco alert triage cycle: fetches the alert buffer,
-            correlates with K8s context and Prometheus metrics, and posts
+            correlates with K8s context and pod events, and posts
             a structured ESCALATE/SUPPRESS decision report.
     tools:
       - type: McpServer
@@ -75,5 +73,4 @@ spec:
           toolNames:
             - get_alert_buffer
             - get_pod_events
-            - get_pod_metrics
             - post_triage_result

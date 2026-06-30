@@ -1,5 +1,5 @@
 ---
-# ConfigMap with Falcosidekick YAML config — avoids env var limitations in v2.32.0.
+# Falcosidekick config passed as a file via podTemplateSpec (the Component CRD has no native config field).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,12 +7,11 @@ metadata:
   namespace: falco
 data:
   config.yaml: |
-    listenaddress: ""
-    listenport: 2801
     webhook:
       address: "http://webhook-receiver.demo.svc.cluster.local:8000/ingest"
       checkcert: false
-      minimumpriority: "warning"
+      # notice (not warning) so k8s_audit Attach/Exec (NOTICE) and Terminal shell in container (NOTICE) pass through.
+      minimumpriority: "notice"
 ---
 apiVersion: instance.falcosecurity.dev/v1alpha1
 kind: Component
@@ -22,6 +21,8 @@ metadata:
 spec:
   component:
     type: falcosidekick
+    # Pin the bundled Falcosidekick version (operator v0.4.0 default) for reproducibility.
+    version: "2.32.0"
   podTemplateSpec:
     spec:
       containers:

@@ -1,5 +1,5 @@
-# The k8saudit plugin requires the container plugin (>= 0.4.0) to resolve
-# container metadata from audit log events. Both plugins must be loaded together.
+# Enriches syscall events with container metadata (image, name, labels) on the syscall DaemonSet.
+# (Not used by k8saudit: the container plugin only binds to the syscall source.)
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Plugin
 metadata:
@@ -11,6 +11,6 @@ spec:
       name: ghcr.io
     image:
       repository: falcosecurity/plugins/plugin/container
-      tag: latest
+      tag: "0.7.1"
   config:
     name: container

@@ -30,19 +30,16 @@ _AGENT_A2A_URL = (
 # the triage buffer AND the raw alerts UI so the demo stays focused on prod.
 _EXCLUDED_NAMESPACES = {
     "kagent", "falco", "falco-operator", "kube-system",
-    "monitoring", "agentgateway-system", "demo",
+    "agentgateway-system", "demo",
 }
 
-_PROM_BASE = (
-    "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
-)
 _K8S_API = "https://kubernetes.default.svc"
 _SA_TOKEN = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _SA_CA = pathlib.Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
 
 def _now() -> str:
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 async def _broadcast(event: str, data: str) -> None:
@@ -52,20 +49,12 @@ async def _broadcast(event: str, data: str) -> None:
 
 # ─── Falcosidekick endpoints ───────────────────────────────────────────────────
 
-@app.post("/raw")
-async def receive_raw(request: Request):
-    body = await request.json()
-    body["timestamp_received"] = _now()
-    raw_alerts.appendleft(body)
-    await _broadcast("alert", json.dumps(body))
-    return {"status": "ok"}
-
-
 @app.post("/ingest")
 async def ingest(request: Request):
     body = await request.json()
     body["timestamp_received"] = _now()
-    ns = (body.get("output_fields") or {}).get("k8s.ns.name", "")
+    of = body.get("output_fields") or {}
+    ns = of.get("k8s.ns.name") or of.get("ka.target.namespace") or ""
     # Filter system namespaces from both the UI and the triage buffer so the
     # demo only shows user-workload alerts (kagent-postgresql etc. are noise).
     if ns in _EXCLUDED_NAMESPACES:
@@ -91,15 +80,6 @@ async def history():
     })
 
 
-@app.post("/result")
-async def post_result(request: Request):
-    body = await request.json()
-    triage_reports.appendleft(body)
-    alert_buffer.clear()
-    await _broadcast("report", json.dumps(body))
-    return {"status": "ok"}
-
-
 # ─── SSE stream ───────────────────────────────────────────────────────────────
 
 @app.get("/events")
@@ -122,66 +102,6 @@ async def sse_stream(request: Request):
                 _sse_queues.remove(q)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
-
-
-# ─── Prometheus helper ────────────────────────────────────────────────────────
-
-def _prom_range_max_sync(query: str, lookback_minutes: int = 10) -> float | None:
-    """Runs a PromQL range query over the last N minutes; returns max value or None."""
-    now = datetime.datetime.utcnow().timestamp()
-    start = now - lookback_minutes * 60
-    url = (
-        f"{_PROM_BASE}/api/v1/query_range"
-        f"?query={urllib.parse.quote(query)}"
-        f"&start={start:.0f}&end={now:.0f}&step=15"
-    )
-    try:
-        with _urlreq.urlopen(_urlreq.Request(url), timeout=5) as r:
-            data = json.loads(r.read())
-        values = [
-            float(v[1])
-            for series in data.get("data", {}).get("result", [])
-            for v in series.get("values", [])
-            if v[1] not in ("NaN", "+Inf", "-Inf")
-        ]
-        return max(values) if values else None
-    except Exception:
-        return None
-
-
-def _get_pod_metrics_sync(pod: str, namespace: str) -> dict:
-    cpu_peak = _prom_range_max_sync(
-        f'rate(container_cpu_usage_seconds_total{{pod="{pod}",namespace="{namespace}",container!=""}}[30s])'
-    )
-    mem_peak = _prom_range_max_sync(
-        f'container_memory_working_set_bytes{{pod="{pod}",namespace="{namespace}",container!=""}}'
-    )
-    net_peak = _prom_range_max_sync(
-        f'rate(container_network_transmit_bytes_total{{pod="{pod}"}}[30s])'
-    )
-
-    def _fmt_bytes(b: float | None) -> str:
-        if b is None:
-            return "no data"
-        for unit in ("B", "KB", "MB", "GB"):
-            if b < 1024:
-                return f"{b:.1f} {unit}"
-            b /= 1024
-        return f"{b:.1f} TB"
-
-    return {
-        "pod": pod,
-        "namespace": namespace,
-        "query_window": "last 10 minutes",
-        "cpu_peak_cores": round(cpu_peak, 6) if cpu_peak is not None else None,
-        "memory_peak": _fmt_bytes(mem_peak),
-        "network_tx_peak": _fmt_bytes(net_peak) + "/s" if net_peak is not None else "no data",
-        "note": (
-            "No metrics found — pod may have exited before Prometheus scraped it"
-            if cpu_peak is None and mem_peak is None
-            else "Metrics captured from Prometheus cadvisor scrapes"
-        ),
-    }
 
 
 # ─── K8s Events helper ────────────────────────────────────────────────────────
@@ -272,10 +192,13 @@ def _normalize_report(raw: dict, current_buffer: list) -> dict:
         seen_pods: dict = {}
         for a in current_buffer:
             of = a.get("output_fields") or {}
-            pod = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
-            ns = of.get("k8s.ns.name") or of.get("k8s_ns_name") or ""
+            pod = (of.get("k8s.pod.name") or of.get("k8s_pod_name")
+                   or of.get("ka.target.pod.name") or of.get("ka.target.name") or "")
+            ns = (of.get("k8s.ns.name") or of.get("k8s_ns_name")
+                  or of.get("ka.target.namespace") or "")
             image = (of.get("container.image.repository") or
-                     of.get("container_image_repository") or "")
+                     of.get("container_image_repository") or
+                     of.get("ka.req.pod.containers.image") or "")
             if pod and pod not in seen_pods:
                 seen_pods[pod] = {"pod": pod, "namespace": ns, "image": image,
                                   "alert_timeline": []}
@@ -337,7 +260,6 @@ def _normalize_report(raw: dict, current_buffer: list) -> dict:
         "severity": floor_severity,
         "confidence": model_confidence,
         "evidence": _list(raw.get("evidence")),
-        "prometheus_anomalies": _list(raw.get("prometheus_anomalies")),
         "recommended_action": _str(raw.get("recommended_action")),
         "decision": final_decision,
         "suppression_reason": raw.get("suppression_reason") if final_decision == "SUPPRESS" else None,
@@ -346,9 +268,8 @@ def _normalize_report(raw: dict, current_buffer: list) -> dict:
     return report
 
 
-# Exposes get_alert_buffer, get_pod_metrics, and post_triage_result as MCP tools
-# so kagent's triage-agent can read the alert window, query Prometheus, and post
-# results — all without requiring external HTTP tool CRDs.
+# Exposes get_alert_buffer, get_pod_events, and post_triage_result as MCP tools so
+# kagent's triage-agent can read the alert window, fetch K8s events, and post results.
 
 _MCP_TOOLS = [
     {
@@ -364,23 +285,7 @@ _MCP_TOOLS = [
         "description": (
             "Fetches Kubernetes Events for a specific pod (CrashLoopBackOff, OOMKill, "
             "restarts, scheduling failures, image pull errors). "
-            "Call this after k8s_get_resources for lifecycle context."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "pod": {"type": "string", "description": "Pod name"},
-                "namespace": {"type": "string", "description": "Namespace"},
-            },
-            "required": ["pod", "namespace"],
-        },
-    },
-    {
-        "name": "get_pod_metrics",
-        "description": (
-            "Queries in-cluster Prometheus for CPU, memory, and network metrics "
-            "of a specific pod over the last 10 minutes. "
-            "Call this after get_pod_events to detect resource anomalies."
+            "Call this after get_alert_buffer for lifecycle context."
         ),
         "inputSchema": {
             "type": "object",
@@ -411,7 +316,7 @@ _MCP_TOOLS = [
             "recommended_action: 3-5 numbered investigation steps naming the exact pod, files, and kubectl commands. "
             "Do NOT recommend pod deletion, network policy changes, secret rotation, or RBAC changes — "
             "those are remediation actions for the IR team after human review.\n\n"
-            "evidence: One sentence per alert, per K8s event finding, and per Prometheus anomaly."
+            "evidence: One sentence per alert and per K8s event finding."
         ),
         "inputSchema": {
             "type": "object",
@@ -424,7 +329,6 @@ _MCP_TOOLS = [
                 "severity": {"type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"]},
                 "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
                 "evidence": {"type": "array", "items": {"type": "string"}},
-                "prometheus_anomalies": {"type": "array", "items": {"type": "string"}},
                 "recommended_action": {"type": "string"},
                 "decision": {"type": "string", "enum": ["ESCALATE", "SUPPRESS"]},
                 "suppression_reason": {"type": ["string", "null"]},
@@ -454,7 +358,7 @@ async def mcp_endpoint(request: Request):
 
     if method == "initialize":
         result = {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": "2025-11-25",
             "serverInfo": {"name": "webhook-receiver", "version": "1.0.0"},
             "capabilities": {"tools": {}},
         }
@@ -466,7 +370,7 @@ async def mcp_endpoint(request: Request):
         params = body.get("params", {})
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
-        # Gemma4/ADK sometimes serializes arguments as a JSON string (OpenAI format).
+        # Some models/ADK serialize arguments as a JSON string (OpenAI format).
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
@@ -480,10 +384,13 @@ async def mcp_endpoint(request: Request):
             summary = []
             for a in raw:
                 of = a.get("output_fields") or {}
-                pod = of.get("k8s.pod.name") or of.get("k8s_pod_name") or ""
-                ns = of.get("k8s.ns.name") or of.get("k8s_ns_name") or ""
+                pod = (of.get("k8s.pod.name") or of.get("k8s_pod_name")
+                       or of.get("ka.target.pod.name") or of.get("ka.target.name") or "")
+                ns = (of.get("k8s.ns.name") or of.get("k8s_ns_name")
+                      or of.get("ka.target.namespace") or "")
                 image = (of.get("container.image.repository") or
-                         of.get("container_image_repository") or "")
+                         of.get("container_image_repository") or
+                         of.get("ka.req.pod.containers.image") or "")
                 key = (a.get("rule", ""), pod)
                 if key not in seen:
                     seen[key] = 0
@@ -505,17 +412,18 @@ async def mcp_endpoint(request: Request):
             namespace = arguments.get("namespace", "prod")
             events = await asyncio.to_thread(_get_pod_events_sync, pod, namespace)
             result = {"content": [{"type": "text", "text": json.dumps(events)}]}
-        elif tool_name == "get_pod_metrics":
-            pod = arguments.get("pod", "")
-            namespace = arguments.get("namespace", "prod")
-            metrics = await asyncio.to_thread(_get_pod_metrics_sync, pod, namespace)
-            result = {"content": [{"type": "text", "text": json.dumps(metrics)}]}
         elif tool_name == "post_triage_result":
-            report = _normalize_report(arguments, list(alert_buffer))
-            triage_reports.appendleft(report)
-            alert_buffer.clear()
-            await _broadcast("report", json.dumps(report))
-            result = {"content": [{"type": "text", "text": '{"status":"ok","flushed":true}'}]}
+            # Guard: only the first post of a cycle (non-empty buffer) creates a report.
+            # Small models sometimes call post_triage_result repeatedly; without this guard
+            # every repeat sees an already-flushed buffer and emits an empty SUPPRESS report.
+            if not alert_buffer:
+                result = {"content": [{"type": "text", "text": '{"status":"ok","note":"buffer already flushed; no report created"}'}]}
+            else:
+                report = _normalize_report(arguments, list(alert_buffer))
+                triage_reports.appendleft(report)
+                alert_buffer.clear()
+                await _broadcast("report", json.dumps(report))
+                result = {"content": [{"type": "text", "text": '{"status":"ok","flushed":true}'}]}
         else:
             return JSONResponse(
                 {
@@ -713,8 +621,8 @@ function badgeCls(v) { return (v||'debug').toLowerCase().replace(/[^a-z]/g,''); 
 
 function renderRaw(d) {
   const pri = (d.priority || 'debug').toLowerCase();
-  const ns  = d.output_fields?.['k8s.ns.name'] || d.output_fields?.['k8smeta.namespace.name'] || '—';
-  const pod = d.output_fields?.['k8s.pod.name'] || d.output_fields?.['k8smeta.pod.name'] || '—';
+  const ns  = d.output_fields?.['k8s.ns.name'] || d.output_fields?.['ka.target.namespace'] || '—';
+  const pod = d.output_fields?.['k8s.pod.name'] || d.output_fields?.['ka.target.pod.name'] || d.output_fields?.['ka.target.name'] || '—';
   return `<div class="card">
     <div class="card-header">
       <span class="timestamp">${esc(d.timestamp_received)}</span>
@@ -750,7 +658,6 @@ function renderReport(d) {
   }).join('');
 
   const evidence = (d.evidence || []).map(e => `<li>${esc(e)}</li>`).join('');
-  const anomalies = (d.prometheus_anomalies || []).map(a => `<li>${esc(a)}</li>`).join('');
 
   return `<div class="card">
     <div class="card-header">
@@ -769,7 +676,6 @@ function renderReport(d) {
       ${(d.correlation_summary||'').split(/\n+|(?=Paragraph \d+:)/i).filter(Boolean).map(p=>`<p class="narrative">${esc(p.replace(/^Paragraph \d+:\s*/i,'').trim())}</p>`).filter(p=>p!='<p class="narrative"></p>').join('')}
     </div>
     ${evidence ? `<div class="report-section"><h4>Evidence</h4><ul class="evidence">${evidence}</ul></div>` : ''}
-    ${anomalies ? `<div class="report-section"><h4>Prometheus Anomalies</h4><ul class="evidence">${anomalies}</ul></div>` : ''}
     <div class="action"><strong>Recommended action</strong>${fmtAction(d.recommended_action)}</div>
     ${d.suppression_reason ? `<p class="suppression">Suppression reason: ${esc(d.suppression_reason)}</p>` : ''}
     <details><summary>Full JSON</summary><pre>${esc(JSON.stringify(d, null, 2))}</pre></details>

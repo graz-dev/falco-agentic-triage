@@ -1,7 +1,7 @@
 apiVersion: audit.k8s.io/v1
 kind: Policy
 rules:
-  # Capture pod exec and attach in full — primary syscall exec detection signal
+  # Capture pod exec and attach in full (incl. ResponseStarted stage) — the k8saudit Attach/Exec signal
   - level: RequestResponse
     resources:
       - group: ""
