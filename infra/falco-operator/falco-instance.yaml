@@ -4,17 +4,12 @@ metadata:
   name: falco
   namespace: falco
 spec:
-  version: "0.44.0"
+  version: "0.44.1"
   type: DaemonSet
   podTemplateSpec:
     spec:
       containers:
         - name: falco
-          env:
-            # Use modern eBPF driver — no kernel module compilation needed.
-            # Supported on Docker Desktop for Mac (kernel 6.x) out of the box.
-            - name: FALCO_ENGINE_KIND
-              value: modern_ebpf
           volumeMounts:
             # Mount the HTTP output drop-in config into Falco's config.d directory.
             # Falco loads all *.yaml files from config.d at startup (config_files setting).

@@ -1,7 +1,7 @@
 # IMPORTANT: Before applying this file, copy the exact model identifier string
 # from LM Studio's Developer → Local Server tab (the "Model" dropdown) and paste
 # it into spec.ai.groups[0].providers[0].openai.model below.
-# Example: google/gemma-4-12b-it-GGUF/gemma-4-12b-it-Q4_K_M.gguf
+# Example: qwen2.5-7b-instruct-mlx
 apiVersion: agentgateway.dev/v1alpha1
 kind: AgentgatewayBackend
 metadata:
@@ -16,13 +16,11 @@ spec:
             # Linux users: add --add-host=host.docker.internal:host-gateway to Docker daemon.
             host: host.docker.internal
             port: 1234
-            pathPrefix: /v1
+            # agentgateway v1alpha1 schema uses `path` (full OpenAI-compatible path), NOT `pathPrefix`.
+            path: /v1/chat/completions
             openai:
-              # REPLACE with the exact model identifier from LM Studio's server tab.
-              # For Qwen2.5-7B the string looks like:
-              #   Qwen/Qwen2.5-7B-Instruct-GGUF/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-              # For Qwen2.5-14B:
-              #   Qwen/Qwen2.5-14B-Instruct-GGUF/Qwen2.5-14B-Instruct-Q4_K_M.gguf
+              # REPLACE with the exact model id from LM Studio's server tab
+              # (MLX short id, e.g. qwen2.5-7b-instruct-mlx).
               model: "qwen2.5-7b-instruct-mlx"
             policies:
               auth:

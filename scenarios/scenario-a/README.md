@@ -1,81 +1,57 @@
-# Scenario A — Shell in Container
+# Scenario A — Exec into a Production Pod
 
 ## What it does
 
-Runs the `falcosecurity/event-generator` as a Kubernetes Job in the `prod`
-namespace. The job calls `syscall.RunShellUntrusted`, which spawns an
-untrusted shell inside a running container. This fires Falco's built-in
-**Terminal shell in container** rule.
+A Kubernetes Job in namespace `prod` performs a real `kubectl exec` into the running
+`webapp` pod, using a ServiceAccount granted `pods/exec`. The exec is an API call the
+audit log captures, and the command it runs inside the container (`cat /etc/shadow`)
+trips a syscall rule. One action, two detection sources, the same target pod.
 
-## Expected Falco alert
+This is the smallest scenario that crosses both pipelines — useful to see the agent
+correlate an audit-log event with an in-container syscall event without a full attack
+chain to lean on.
 
-```
-Terminal shell in container (user=root shell=sh parent=<parent>
-  cmdline=sh container=<id> image=falcosecurity/event-generator
-  k8s_ns=prod k8s_pod=event-generator-<suffix>)
-```
+## Expected alerts
 
-Priority: **WARNING**
+| Source | Rule | Priority | Pod |
+|--------|------|----------|-----|
+| k8saudit | `Attach/Exec Pod` | NOTICE | `webapp-*` (the exec target) |
+| syscall | `Read sensitive file untrusted` | WARNING | `webapp-*` (the `cat /etc/shadow`) |
+| syscall | `Contact K8S API Server From Container` | NOTICE | `event-generator-*` (the tool pod talking to the API) |
 
----
+The third alert is a side effect of driving the attack from inside the cluster: the
+exec-driver pod itself contacts the API server, which Falco flags. It is honest noise —
+an attacker's tooling reaching the API is a real signal — and it shows up on a different
+pod than the target.
 
-## How the agent processes this scenario
+> No `-it` (no TTY) on the exec: that is why you see `Read sensitive file untrusted`
+> (the reader is `cat`) rather than `Terminal shell in container` (which requires an
+> attached terminal). See `infra/falco-operator/k8saudit/README.md` for the audit wiring.
 
-### Without the agent
+## How the agent processes it
 
-An analyst receiving this alert must:
+The webhook-receiver buffers the alerts (prod is in scope) and, on the next 30-second
+tick, triggers the agent. The agent runs a fixed, read-only chain:
 
-1. Identify the pod from the raw Falco JSON
-2. Run `kubectl describe pod event-generator-<suffix> -n prod` to check image,
-   security context, and owner (is it a Job? a Deployment? is it expected?)
-3. Check `kubectl get events -n prod` for any CrashLoop or restart history
-4. Open Grafana, find the pod, check CPU/memory — any spike? Any previous
-   anomalies?
-5. Decide: was this a legitimate `kubectl exec` by an engineer? Or something
-   suspicious?
+| Tool | What it does |
+|------|--------------|
+| `get_alert_buffer` | Reads the batch — rules, priorities, timestamps, pods, across both sources |
+| `get_pod_events` | Pulls lifecycle events for the pod (restarts, crashes) for context |
+| `post_triage_result` | Submits the structured report; the receiver normalizes it and flushes the buffer |
 
-This takes **10–20 minutes** and requires knowing which kubectl commands to
-run, what "normal" looks like for this workload, and whether this rule fires
-often enough to be noise.
+It has no other tools — no metrics, no cluster reads beyond pod events. The receiver's
+deterministic floor then sets the final severity and decision from the actual buffer.
 
-### With the agent (30–90 seconds)
+## Expected verdict
 
-The agent calls four tools automatically:
+A NOTICE exec plus a WARNING file read is real corroboration but short of a full
+intrusion chain, so expect **MEDIUM / ESCALATE**: enough signal to put it in front of a
+human, not enough to call it an incident on its own. The analyst confirms whether the
+exec was authorized.
 
-| Tool | What it finds |
-|------|---------------|
-| `get_alert_buffer` | Single WARNING alert: "Terminal shell in container" on `event-generator-*` in `prod` |
-| `k8s_get_resources` | Pod image = `falcosecurity/event-generator`, owner = Job, runs as root, `privileged: true` |
-| `get_pod_events` | Pod `Started`, `Completed` — no CrashLoop, no OOMKill, no restarts |
-| `get_pod_metrics` | CPU peak ~0.01 cores, memory ~8 MB — minimal resource use |
+## Value
 
-The agent correlates: one alert, no lifecycle anomalies, no resource spike,
-transient Job workload. With a single WARNING and no corroborating signals,
-confidence stays below 70% → automatic ESCALATE per the constraint, with a
-narrative like:
-
-> "A single terminal shell event was detected on a transient event-generator
-> Job in namespace prod. No corroborating signals — no CrashLoop history, no
-> sensitive file reads, no resource spike. The event may represent a scheduled
-> test or an authorized exec. Confidence is insufficient to suppress without
-> human confirmation."
-
-### Value delivered
-
-- **Time saved:** 10–20 minutes of manual investigation → 30–90 seconds
-- **Context pre-built:** Pod image, owner, lifecycle, and metrics already
-  gathered and explained — analyst confirms or overrides in seconds
-- **ESCALATE with rationale:** The analyst sees WHY the agent couldn't suppress
-  (single alert, low confidence), not just a raw alert with no guidance
-
----
-
-## Notes
-
-- The alert references the **event-generator pod** itself, not the `webapp` pod.
-  This is expected — the event-generator creates its own execution context.
-  The agent correlates on namespace, so the `prod` context is captured.
-- Scenario A is intentionally simple: one alert, no multi-step pattern,
-  expected low confidence. It demonstrates the ESCALATE path and shows the
-  analyst what the agent collects even for ambiguous cases.
-- Use **Scenario B** for the high-confidence multi-alert ESCALATE demonstration.
+- One pre-built report instead of pivoting by hand between the audit log and runtime alerts.
+- The two sources are already joined: "someone exec'd into this pod, and inside it a
+  sensitive file was read" — a link no single rule makes.
+- The ESCALATE comes with its rationale, so the analyst validates rather than investigates.

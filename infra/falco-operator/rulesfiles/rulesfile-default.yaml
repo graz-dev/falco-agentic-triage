@@ -9,6 +9,6 @@ spec:
     registry:
       name: ghcr.io
     image:
-      # falco-rules 5.1.0 ships with Falco 0.44.0
+      # falco-rules 5.1.0 ships with Falco 0.44.x (0.44.0 / 0.44.1)
       repository: falcosecurity/rules/falco-rules
       tag: "5.1.0"
